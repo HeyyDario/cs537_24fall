@@ -23,6 +23,7 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int getparentname(char* parentbuf,char* childbuf, int parentbufsize, int childbufsize);
 
 // ulib.c
 int stat(const char*, struct stat*);
