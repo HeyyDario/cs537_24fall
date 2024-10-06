@@ -18,7 +18,7 @@ Date:9/13/2024          Commit Message:"Passed all tests."
 #include <stdlib.h>
 #include <string.h>
 
-#define BOARD_SIZE 5 // seems to be at most 4, but for flexibility we take 5
+#define BOARD_SIZE 50 // seems to be at most 4, but for flexibility we take 5
 #define DICT_CAPACITY 1000
 #define NUM_LET 26
 #define SOLUTION_CAPACITY 1000
@@ -46,24 +46,30 @@ int letters_counter_solution[NUM_LET] = {0};
 // define function prototypes
 void read_board(const char* fileName);
 void read_dict(const char* fileName);
-void read_solution();
+void read_solution(void);
 int is_in_dict(const char* word);
 int prev_match_curr(const char *prev, const char *curr);
 int is_same_side_consecutive(const char *word);
 int is_on_board(const char *word);
-void test_solution();
+void test_solution(void);
 
 
 int main(int argc, char* argv[]){
+	printf("hello world");
 	// initial check for the correct number of args
     if(argc != 3){
         printf("Usage: %s <board_file_name> <dict_file_name>\n", argv[0]);
+		//printf("HI whats up");
         return 1;
     }
 
+	printf("Start from main!");
+
 	// read the board and dict file
 	read_board(argv[1]);
+	printf("I have passed read_board.");
 	read_dict(argv[2]);
+	printf("I have passed read_dict");
 
 	test_solution();
 
@@ -98,6 +104,7 @@ void read_board(const char* fileName){
 	FILE *file = fopen(fileName,"r");
 	if(!file){
 		printf("open board failed\n");
+		//printf(" ");
 		exit(1);
 	}
 	char *line = NULL;
@@ -191,7 +198,7 @@ void read_dict(const char* fileName){
 	free(line);
 }
 
-void read_solution(){
+void read_solution(void){
 	solution_size = 0;
 	solution = malloc(sizeof(char *) * solution_capacity);
 	if(!solution){
@@ -297,7 +304,7 @@ int is_on_board(const char *word){
 }
 
 
-void test_solution(){
+void test_solution(void){
 	read_solution();
 
 	// rules check
