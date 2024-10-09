@@ -7,6 +7,12 @@ void run_test(const char *cmd);
 void run_comment_test(const char *input, const char *expected_output);
 void run_redirection_test(const char *cmd, const char *expected_output_file, const char *expected_content);
 void run_variable_test(const char *cmd, const char *expected_output);
+void run_path_test(const char *cmd, const char *expected_output);
+
+void run_history_test();
+void run_history_set_test();
+void run_history_execution_test();
+
 
 int main() {
     int result;
@@ -104,8 +110,37 @@ int main() {
 
     // Test 19: Modifying local variable and echo
     run_variable_test("local myvar=/home/otheruser\n /bin/echo $myvar\n", "/home/otheruser\n");
+
+    // Path tests:
+    printf("\nRunning Path tests:\n");
+
+    // Test 20: Execute a command from /bin (default $PATH)
+    printf("Test 20: Execute a command from /bin\n");
+    run_path_test("echo hello", "hello\n");
+
+    // Test 21: Execute a command using a full path
+    printf("Test 21: Execute a command using a full path\n");
+    run_path_test("/bin/ls", NULL);  // We just expect it to run without an error
+
+    // Test 22: Modify $PATH and execute a command
+    printf("Test 22: Modify $PATH and execute a command\n");
+    result = system("echo 'echo PATH test' > /tmp/myprogram");
+    if (result != 0) { perror("Error creating /tmp/myprogram"); return result; }
+    result = system("chmod +x /tmp/myprogram");  // Make it executable
+    if (result != 0) { perror("Error making /tmp/myprogram executable"); return result; }
+    run_path_test("export PATH=/tmp; myprogram", "PATH test\n");
+
+    // Test 23: Non-existent command
+    printf("Test 23: Non-existent command\n");
+    run_path_test("nonexistentcmd", "nonexistentcmd: command not found\n");
+
+    // Test 24: History command
+    run_history_test();
+    run_history_set_test();
+    run_history_execution_test();
     
     printf("All tests finished.\n");
+
     
     // Cleanup
     result = system("rm script.wsh empty.wsh invalid_cmd.wsh output.txt test_script.wsh test_output.txt test_input.txt");
@@ -272,3 +307,109 @@ void run_variable_test(const char *cmd, const char *expected_output) {
     remove("output.txt");
 }
 
+void run_path_test(const char *cmd, const char *expected_output) {
+    // Prepare a temporary script for testing
+    FILE *script_file = fopen("test_script.wsh", "w");
+    if (script_file == NULL) {
+        perror("Failed to create test script");
+        exit(1);
+    }
+
+    // Write the command to the script file
+    fprintf(script_file, "%s\n", cmd);
+    fclose(script_file);
+
+    // Run the shell in batch mode with the test script and redirect the output
+    int result = system("./wsh test_script.wsh > output.txt 2>&1");  // Capture both stdout and stderr
+    if (result != 0 && expected_output == NULL) {
+        printf("Test failed for command: %s\n", cmd);
+        return;
+    }
+
+    // Open the output file and check its contents
+    FILE *output_file = fopen("output.txt", "r");
+    if (output_file == NULL) {
+        perror("Failed to open output file");
+        exit(1);
+    }
+
+    // Read the actual output from the shell
+    char actual_output[1024] = {0};
+    if (fgets(actual_output, sizeof(actual_output), output_file) == NULL && !feof(output_file)) {
+        perror("Failed to read from output file");
+        fclose(output_file);
+        exit(1);
+    }
+    fclose(output_file);
+
+    // Compare the actual output with the expected output
+    if (expected_output != NULL && strcmp(actual_output, expected_output) == 0) {
+        printf("Test passed: %s\n", cmd);
+    } else if (expected_output == NULL) {
+        printf("Test passed: %s (no output expected)\n", cmd);
+    } else {
+        printf("Test failed: %s\nExpected: '%s', but got: '%s'\n", cmd, expected_output, actual_output);
+    }
+
+    // Clean up
+    remove("test_script.wsh");
+    remove("output.txt");
+}
+
+// Test 1: Basic history functionality
+void run_history_test() {
+    printf("\nRunning history tests:\n");
+
+    // Simulate executing commands and storing them in history
+    run_test("./wsh -c 'echo first'");
+    run_test("./wsh -c 'echo second'");
+    run_test("./wsh -c 'echo third'");
+    run_test("./wsh -c 'echo second'");  // This should not be added as a duplicate
+    run_test("./wsh -c 'history'");
+
+    // Expected output:
+    // 1) echo first
+    // 2) echo second
+    // 3) echo third
+}
+
+// Test 2: History set functionality
+void run_history_set_test() {
+    printf("\nRunning history set tests:\n");
+
+    // Resize history to 2 and execute commands
+    run_test("./wsh -c 'history set 2'");
+    run_test("./wsh -c 'echo fourth'");
+    run_test("./wsh -c 'echo fifth'");
+    run_test("./wsh -c 'history'");
+
+    // Expected output:
+    // 1) echo fourth
+    // 2) echo fifth
+
+    // Now set history back to 5 and continue
+    run_test("./wsh -c 'history set 5'");
+    run_test("./wsh -c 'echo sixth'");
+    run_test("./wsh -c 'history'");
+
+    // Expected output:
+    // 1) echo fifth
+    // 2) echo sixth
+}
+
+// Test 3: Executing commands from history
+void run_history_execution_test() {
+    printf("\nRunning history execution tests:\n");
+
+    // Execute a command from history
+    run_test("./wsh -c 'echo seventh'");
+    run_test("./wsh -c 'history 2'");  // This should re-execute "echo sixth"
+
+    // Expected output for the last command: sixth
+
+    run_test("./wsh -c 'history'");
+
+    // Expected output:
+    // 1) echo sixth
+    // 2) echo seventh
+}
