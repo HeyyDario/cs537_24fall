@@ -1,6 +1,0 @@
-Makefile
-wsh
-wsh-asan
-wsh-dbg
-wsh.c
-wsh.h
