@@ -34,6 +34,8 @@ struct context {
 
 enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define STRIDE1 (1 << 10)
+
 // Per-process state
 struct proc {
   uint sz;                     // Size of process memory (bytes)
@@ -49,7 +51,13 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int tickets;                 // number of tickets assigned to this process
+  int stride;                  // inversely proportional to tickets
+  int pass;                    // updated on each run
 };
+
+struct proc* getptable(void);
+struct spinlock* getptablelock(void);
 
 // Process memory is laid out contiguously, low addresses first:
 //   text

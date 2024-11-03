@@ -89,3 +89,25 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+int sys_settickets(void) {
+    int pid, tickets;
+
+    if (argint(0, &pid) < 0 || argint(1, &tickets) < 0 || tickets < 1)
+        return -1;
+
+    struct proc *p;
+    struct spinlock *lock = getptablelock();
+    acquire(lock);
+    for (p = getptable(); p < getptable() + NPROC; p++) {
+        if (p->pid == pid) {
+            p->tickets = tickets;
+            p->stride = STRIDE1 / tickets; // Recalculate stride based on new tickets
+            release(lock);
+            return 0;
+        }
+    }
+    release(lock);
+    return -1; // Process not found
+}
+
