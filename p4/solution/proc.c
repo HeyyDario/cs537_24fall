@@ -13,12 +13,45 @@ struct
   struct proc proc[NPROC];
 } ptable;
 
-struct proc* getptable(void) {
-    return ptable.proc;
+struct proc *getptable(void)
+{
+  return ptable.proc;
 }
 
-struct spinlock* getptablelock(void) {
-    return &ptable.lock;
+struct spinlock *getptablelock(void)
+{
+  return &ptable.lock;
+}
+
+int global_tickets = 0; // Sum of all runnable process tickets
+int global_stride = 0;  // STRIDE1 / global_tickets
+int global_pass = 0;    // Incremented by global_stride each tick
+
+// Getter and Setter for global_tickets
+int get_global_tickets(void) {
+    return global_tickets;
+}
+
+void set_global_tickets(int tickets) {
+    global_tickets = tickets;
+}
+
+// Getter and Setter for global_stride
+int get_global_stride(void) {
+    return global_stride;
+}
+
+void set_global_stride(int stride) {
+    global_stride = stride;
+}
+
+// Getter and Setter for global_pass
+int get_global_pass(void) {
+    return global_pass;
+}
+
+void set_global_pass(int pass) {
+    global_pass = pass;
 }
 
 static struct proc *initproc;
@@ -102,7 +135,14 @@ found:
   // initialize tickets, stride, and pass for stride scheduling
   p->tickets = 8;
   p->stride = STRIDE1 / p->tickets;
-  p->pass = 0;
+
+  // Update global tickets and calculate global stride
+  global_tickets += p->tickets;             // Add this process's tickets to global tickets
+  global_stride = STRIDE1 / global_tickets; // Recalculate global stride based on new ticket sum
+
+  // Set the process's initial pass to the current global pass
+  p->pass = global_pass;
+  p->remain = 0; // Initialize remaining stride as 0 for new processes
 
   release(&ptable.lock);
 
@@ -110,6 +150,11 @@ found:
   if ((p->kstack = kalloc()) == 0)
   {
     p->state = UNUSED;
+    acquire(&ptable.lock);
+    global_tickets -= p->tickets; // Decrement global tickets if allocation fails
+    if (global_tickets > 0)
+      global_stride = STRIDE1 / global_tickets;
+    release(&ptable.lock);
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
@@ -268,6 +313,13 @@ void exit(void)
 
   acquire(&ptable.lock);
 
+  // Update global tickets and stride when a process exits
+  global_tickets -= curproc->tickets; // Remove current process's tickets from global total
+  if (global_tickets > 0)
+    global_stride = STRIDE1 / global_tickets; // Recalculate global stride if there are remaining processes
+  else
+    global_stride = 0; // Set to 0 if no runnable processes remain
+
   // Parent might be sleeping in wait().
   wakeup1(curproc->parent);
 
@@ -358,6 +410,7 @@ void scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+    global_pass += global_stride; // Increment global pass each tick
     selected_proc = 0;
 
     for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
@@ -384,6 +437,12 @@ void scheduler(void)
 
         swtch(&(c->scheduler), p->context);
         switchkvm();
+
+        // Update remain when the process is temporarily removed
+        if (p->state != RUNNABLE)
+        {
+          p->remain = p->pass - global_pass;
+        }
 
         // Process is done running for now
         c->proc = 0;
@@ -513,9 +572,17 @@ wakeup1(void *chan)
 {
   struct proc *p;
 
+  acquire(&ptable.lock);
   for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+  {
     if (p->state == SLEEPING && p->chan == chan)
+    {
       p->state = RUNNABLE;
+      p->pass = global_pass + p->remain; // Adjust pass based on remain
+      p->remain = 0; // Reset remain after rejoining
+    }
+  }
+  release(&ptable.lock);
 }
 
 // Wake up all processes sleeping on chan.

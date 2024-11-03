@@ -54,10 +54,19 @@ struct proc {
   int tickets;                 // number of tickets assigned to this process
   int stride;                  // inversely proportional to tickets
   int pass;                    // updated on each run
+  int remain;                  // number of passes that are left before a process' next selection
 };
 
 struct proc* getptable(void);
 struct spinlock* getptablelock(void);
+
+int get_global_tickets(void);
+void set_global_tickets(int tickets);
+int get_global_stride(void);
+void set_global_stride(int stride);
+int get_global_pass(void);
+void set_global_pass(int pass);
+
 
 // Process memory is laid out contiguously, low addresses first:
 //   text
