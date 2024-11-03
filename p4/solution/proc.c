@@ -28,30 +28,36 @@ int global_stride = 0;  // STRIDE1 / global_tickets
 int global_pass = 0;    // Incremented by global_stride each tick
 
 // Getter and Setter for global_tickets
-int get_global_tickets(void) {
-    return global_tickets;
+int get_global_tickets(void)
+{
+  return global_tickets;
 }
 
-void set_global_tickets(int tickets) {
-    global_tickets = tickets;
+void set_global_tickets(int tickets)
+{
+  global_tickets = tickets;
 }
 
 // Getter and Setter for global_stride
-int get_global_stride(void) {
-    return global_stride;
+int get_global_stride(void)
+{
+  return global_stride;
 }
 
-void set_global_stride(int stride) {
-    global_stride = stride;
+void set_global_stride(int stride)
+{
+  global_stride = stride;
 }
 
 // Getter and Setter for global_pass
-int get_global_pass(void) {
-    return global_pass;
+int get_global_pass(void)
+{
+  return global_pass;
 }
 
-void set_global_pass(int pass) {
-    global_pass = pass;
+void set_global_pass(int pass)
+{
+  global_pass = pass;
 }
 
 static struct proc *initproc;
@@ -410,6 +416,25 @@ void scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+#ifdef SCHED_RR
+    // Round Robin Scheduler
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+    {
+      if (p->state != RUNNABLE)
+        continue;
+
+      // Switch to chosen process
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      // Process is done running for now
+      c->proc = 0;
+    }
+#elif defined(SCHED_STRIDE)
     global_pass += global_stride; // Increment global pass each tick
     selected_proc = 0;
 
@@ -423,47 +448,33 @@ void scheduler(void)
       {
         selected_proc = p;
       }
+    }
 
-      // Run the selected process if found
-      if (selected_proc != 0)
-      {
-        p = selected_proc;
-        p->pass += p->stride; // increment pass by stride
+    // Run the selected process if found
+    if (selected_proc != 0)
+    {
+      p = selected_proc;
+      p->pass += p->stride; // increment pass by stride
 
-        // Switch to the chosen process
-        c->proc = p;
-        switchuvm(p);
-        p->state = RUNNING;
-
-        swtch(&(c->scheduler), p->context);
-        switchkvm();
-
-        // Update remain when the process is temporarily removed
-        if (p->state != RUNNABLE)
-        {
-          p->remain = p->pass - global_pass;
-        }
-
-        // Process is done running for now
-        c->proc = 0;
-      }
-
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
+      // Switch to the chosen process
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
 
-      cprintf("About to run: %s [pid %d]\n", c->proc->name, c->proc->pid);
-
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
+      // Update remain when the process is temporarily removed
+      if (p->state != RUNNABLE)
+      {
+        p->remain = p->pass - global_pass;
+      }
+
+      // Process is done running for now
       c->proc = 0;
     }
+#endif
+
     release(&ptable.lock);
 
   } // end forever
@@ -579,7 +590,7 @@ wakeup1(void *chan)
     {
       p->state = RUNNABLE;
       p->pass = global_pass + p->remain; // Adjust pass based on remain
-      p->remain = 0; // Reset remain after rejoining
+      p->remain = 0;                     // Reset remain after rejoining
     }
   }
   release(&ptable.lock);
