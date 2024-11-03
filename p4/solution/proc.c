@@ -60,6 +60,15 @@ void set_global_pass(int pass)
   global_pass = pass;
 }
 
+// Lock and unlock functions for ptable
+void acquire_ptable_lock(void) {
+    acquire(&ptable.lock);
+}
+
+void release_ptable_lock(void) {
+    release(&ptable.lock);
+}
+
 static struct proc *initproc;
 
 int nextpid = 1;
@@ -149,6 +158,7 @@ found:
   // Set the process's initial pass to the current global pass
   p->pass = global_pass;
   p->remain = 0; // Initialize remaining stride as 0 for new processes
+  p->run_ticks = 0;
 
   release(&ptable.lock);
 
@@ -444,7 +454,19 @@ void scheduler(void)
         continue;
 
       // Select the process with the smallest pass value
-      if (selected_proc == 0 || p->pass < selected_proc->pass)
+      // if (selected_proc == 0 || p->pass < selected_proc->pass)
+      // {
+      //   selected_proc = p;
+      // }
+
+      // Select process with lowest pass, using run_ticks and pid for tie-breaking
+      if (selected_proc == 0 ||
+          p->pass < selected_proc->pass ||   // Primary: Lowest pass value
+          (p->pass == selected_proc->pass && // Secondary: Lower runtime in ticks
+           p->run_ticks < selected_proc->run_ticks) ||
+          (p->pass == selected_proc->pass && // Tertiary: Lower PID for identical pass and runtime
+           p->run_ticks == selected_proc->run_ticks &&
+           p->pid < selected_proc->pid))
       {
         selected_proc = p;
       }
@@ -455,6 +477,7 @@ void scheduler(void)
     {
       p = selected_proc;
       p->pass += p->stride; // increment pass by stride
+      p->run_ticks++;       // Increment the number of ticks the process has run
 
       // Switch to the chosen process
       c->proc = p;

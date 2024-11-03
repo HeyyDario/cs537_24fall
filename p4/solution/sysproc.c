@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "mmu.h"
 #include "proc.h"
+#include "pstat.h"
 
 int
 sys_fork(void)
@@ -90,7 +91,7 @@ sys_uptime(void)
   return xticks;
 }
 
-int sys_settickets(void) {
+int sys_settickets_pid(void) {
     int pid, new_tickets;
 
     if (argint(0, &pid) < 0 || argint(1, &new_tickets) < 0 || new_tickets < 1)
@@ -138,6 +139,69 @@ int sys_settickets(void) {
     }
     release(lock);
     return -1; // Process not found
+}
+
+int sys_settickets(void) {
+    int n;
+    struct proc *p = myproc(); // Get the current process
+
+    if (argint(0, &n) < 0)
+        return -1;
+
+    // Clamp n to the allowed ticket range
+    if (n < 1)
+        n = 8;               // Default to 8 if n is less than 1
+    else if (n > (1 << 5))   // Maximum of 32 tickets
+        n = 1 << 5;
+
+    acquire_ptable_lock(); // Lock ptable
+
+    // Update global tickets and process tickets
+    int global_tickets = get_global_tickets();
+    global_tickets -= p->tickets;   // Remove current tickets from global count
+    p->tickets = n;                 // Set new ticket value
+    global_tickets += p->tickets;   // Add new tickets to global count
+    set_global_tickets(global_tickets);
+
+    // Recalculate stride and pass based on new ticket count
+    p->stride = STRIDE1 / p->tickets;
+    if (global_tickets > 0)
+        set_global_stride(STRIDE1 / global_tickets);
+
+    // Adjust remain and pass values
+    int old_stride = p->stride;
+    if (old_stride > 0) {
+        p->remain = (p->remain * p->stride) / old_stride;
+    }
+    p->pass = get_global_pass() + p->remain;
+
+    release_ptable_lock(); // Unlock ptable
+    return 0;
+}
+
+int sys_getpinfo(void) {
+    struct pstat *ps;
+
+    // Retrieve the pointer to the pstat structure passed from user space
+    if (argptr(0, (void*)&ps, sizeof(*ps)) < 0)
+        return -1;
+
+    acquire_ptable_lock(); // Lock the process table
+
+    struct proc *p;
+    int i;
+    for (i = 0, p = getptable(); p < getptable() + NPROC; i++, p++) {
+        ps->inuse[i] = (p->state != UNUSED) ? 1 : 0;
+        ps->tickets[i] = p->tickets;
+        ps->pid[i] = p->pid;
+        ps->pass[i] = p->pass;
+        ps->remain[i] = p->remain;
+        ps->stride[i] = p->stride;
+        ps->rtime[i] = p->run_ticks; // Total running time (ticks)
+    }
+
+    release_ptable_lock(); // Unlock the process table
+    return 0; // Success
 }
 
 
