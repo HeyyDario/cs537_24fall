@@ -413,8 +413,12 @@ int wait(void)
 //       via swtch back to the scheduler.
 void scheduler(void)
 {
+#ifdef SCHED_RR
+  struct proc *p;
+#elif defined(SCHED_STRIDE)
   struct proc *p;
   struct proc *selected_proc;
+#endif
 
   struct cpu *c = mycpu();
   c->proc = 0;
@@ -606,7 +610,6 @@ wakeup1(void *chan)
 {
   struct proc *p;
 
-  acquire(&ptable.lock);
   for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
   {
     if (p->state == SLEEPING && p->chan == chan)
@@ -616,7 +619,6 @@ wakeup1(void *chan)
       p->remain = 0;                     // Reset remain after rejoining
     }
   }
-  release(&ptable.lock);
 }
 
 // Wake up all processes sleeping on chan.

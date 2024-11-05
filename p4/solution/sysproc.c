@@ -98,8 +98,9 @@ int sys_settickets_pid(void) {
         return -1;
 
     struct proc *p;
-    struct spinlock *lock = getptablelock();
-    acquire(lock);
+    // struct spinlock *lock = getptablelock();
+    // acquire(lock);
+    acquire(&tickslock);
     
     for (p = getptable(); p < getptable() + NPROC; p++) {
         if (p->pid == pid) {
@@ -133,17 +134,20 @@ int sys_settickets_pid(void) {
             set_global_tickets(global_tickets);
             set_global_stride(STRIDE1 / global_tickets);
 
-            release(lock);
+            // release(lock);
+            release(&tickslock);
             return 0;
         }
     }
-    release(lock);
+    // release(lock);
+    release(&tickslock);
     return -1; // Process not found
 }
 
 int sys_settickets(void) {
     int n;
     struct proc *p = myproc(); // Get the current process
+    //struct spinlock *lock = getptablelock();
 
     if (argint(0, &n) < 0)
         return -1;
@@ -154,7 +158,10 @@ int sys_settickets(void) {
     else if (n > (1 << 5))   // Maximum of 32 tickets
         n = 1 << 5;
 
-    acquire_ptable_lock(); // Lock ptable
+    //acquire_ptable_lock(); // Lock ptable
+    
+    //acquire(lock);
+    acquire(&tickslock);
 
     // Update global tickets and process tickets
     int global_tickets = get_global_tickets();
@@ -175,18 +182,22 @@ int sys_settickets(void) {
     }
     p->pass = get_global_pass() + p->remain;
 
-    release_ptable_lock(); // Unlock ptable
+    //release_ptable_lock(); // Unlock ptable
+    release(&tickslock);
     return 0;
 }
 
 int sys_getpinfo(void) {
     struct pstat *ps;
+    //struct spinlock *lock = getptablelock();
 
     // Retrieve the pointer to the pstat structure passed from user space
     if (argptr(0, (void*)&ps, sizeof(*ps)) < 0)
         return -1;
 
-    acquire_ptable_lock(); // Lock the process table
+    //acquire_ptable_lock(); // Lock the process table
+    //acquire(lock);
+    acquire(&tickslock);
 
     struct proc *p;
     int i;
@@ -200,7 +211,8 @@ int sys_getpinfo(void) {
         ps->rtime[i] = p->run_ticks; // Total running time (ticks)
     }
 
-    release_ptable_lock(); // Unlock the process table
+    //release_ptable_lock(); // Unlock the process table
+    release(&tickslock);
     return 0; // Success
 }
 
