@@ -13,6 +13,20 @@ struct
   struct proc proc[NPROC];
 } ptable;
 
+// Define a structure to hold global stride scheduling variables
+struct {
+  int global_tickets;
+  int global_stride;
+  int global_pass;
+} strideglobalinfo;
+
+// Initialize the stride scheduler variables
+void strideschedulerinit(void) {
+  strideglobalinfo.global_tickets = 0;
+  strideglobalinfo.global_stride = 0;
+  strideglobalinfo.global_pass = 0;
+}
+
 struct proc *getptable(void)
 {
   return ptable.proc;
@@ -21,43 +35,6 @@ struct proc *getptable(void)
 struct spinlock *getptablelock(void)
 {
   return &ptable.lock;
-}
-
-int global_tickets = 0; // Sum of all runnable process tickets
-int global_stride = 0;  // STRIDE1 / global_tickets
-int global_pass = 0;    // Incremented by global_stride each tick
-
-// Getter and Setter for global_tickets
-int get_global_tickets(void)
-{
-  return global_tickets;
-}
-
-void set_global_tickets(int tickets)
-{
-  global_tickets = tickets;
-}
-
-// Getter and Setter for global_stride
-int get_global_stride(void)
-{
-  return global_stride;
-}
-
-void set_global_stride(int stride)
-{
-  global_stride = stride;
-}
-
-// Getter and Setter for global_pass
-int get_global_pass(void)
-{
-  return global_pass;
-}
-
-void set_global_pass(int pass)
-{
-  global_pass = pass;
 }
 
 // Lock and unlock functions for ptable
@@ -80,6 +57,7 @@ static void wakeup1(void *chan);
 void pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+  strideschedulerinit();
 }
 
 // Must be called with interrupts disabled
@@ -150,15 +128,13 @@ found:
   // initialize tickets, stride, and pass for stride scheduling
   p->tickets = 8;
   p->stride = STRIDE1 / p->tickets;
+  p->pass = strideglobalinfo.global_pass;
+  p->remain = 0;
+  p->run_ticks = 0;
 
   // Update global tickets and calculate global stride
-  global_tickets += p->tickets;             // Add this process's tickets to global tickets
-  global_stride = STRIDE1 / global_tickets; // Recalculate global stride based on new ticket sum
-
-  // Set the process's initial pass to the current global pass
-  p->pass = global_pass;
-  p->remain = 0; // Initialize remaining stride as 0 for new processes
-  p->run_ticks = 0;
+  strideglobalinfo.global_tickets += p->tickets;
+  strideglobalinfo.global_stride = STRIDE1 / strideglobalinfo.global_tickets;
 
   release(&ptable.lock);
 
@@ -167,9 +143,11 @@ found:
   {
     p->state = UNUSED;
     acquire(&ptable.lock);
-    global_tickets -= p->tickets; // Decrement global tickets if allocation fails
-    if (global_tickets > 0)
-      global_stride = STRIDE1 / global_tickets;
+    strideglobalinfo.global_tickets -= p->tickets; // Decrement global tickets if allocation fails
+    if (strideglobalinfo.global_tickets > 0)
+      strideglobalinfo.global_stride = STRIDE1 / strideglobalinfo.global_tickets;
+    else
+      strideglobalinfo.global_stride = 0;
     release(&ptable.lock);
     return 0;
   }
@@ -225,6 +203,7 @@ void userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
+  p->pass = strideglobalinfo.global_pass + p->remain;
 
   release(&ptable.lock);
 }
@@ -273,6 +252,13 @@ int fork(void)
     kfree(np->kstack);
     np->kstack = 0;
     np->state = UNUSED;
+    acquire(&ptable.lock);
+    strideglobalinfo.global_tickets -= np->tickets; // Adjust global tickets
+    if (strideglobalinfo.global_tickets > 0)
+      strideglobalinfo.global_stride = STRIDE1 / strideglobalinfo.global_tickets;
+    else
+      strideglobalinfo.global_stride = 0;
+    release(&ptable.lock);
     return -1;
   }
   np->sz = curproc->sz;
@@ -294,6 +280,7 @@ int fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
+  np->pass = strideglobalinfo.global_pass + np->remain;
 
   release(&ptable.lock);
 
@@ -330,11 +317,11 @@ void exit(void)
   acquire(&ptable.lock);
 
   // Update global tickets and stride when a process exits
-  global_tickets -= curproc->tickets; // Remove current process's tickets from global total
-  if (global_tickets > 0)
-    global_stride = STRIDE1 / global_tickets; // Recalculate global stride if there are remaining processes
+  strideglobalinfo.global_tickets -= curproc->tickets;
+  if (strideglobalinfo.global_tickets > 0)
+    strideglobalinfo.global_stride = STRIDE1 / strideglobalinfo.global_tickets;
   else
-    global_stride = 0; // Set to 0 if no runnable processes remain
+    strideglobalinfo.global_stride = 0;
 
   // Parent might be sleeping in wait().
   wakeup1(curproc->parent);
@@ -403,6 +390,34 @@ int wait(void)
   }
 }
 
+// Update the update_stride_variables function to increment run_ticks
+void
+update_stride_variables(void)
+{
+  int totaltickets = 0;
+  struct proc *p;
+
+  // ptable.lock should already be held when calling this function
+  for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
+  {
+    if (p->state == RUNNING)
+    {
+      p->run_ticks++; // Increment run_ticks when the process is running
+      totaltickets += p->tickets;
+    }
+    else if (p->state == RUNNABLE)
+    {
+      totaltickets += p->tickets;
+    }
+  }
+  strideglobalinfo.global_tickets = totaltickets;
+  if (strideglobalinfo.global_tickets > 0)
+  {
+    strideglobalinfo.global_stride = STRIDE1 / strideglobalinfo.global_tickets;
+    strideglobalinfo.global_pass += strideglobalinfo.global_stride;
+  }
+}
+
 // PAGEBREAK: 42
 //  Per-CPU process scheduler.
 //  Each CPU calls scheduler() after setting itself up.
@@ -411,15 +426,10 @@ int wait(void)
 //   - swtch to start running that process
 //   - eventually that process transfers control
 //       via swtch back to the scheduler.
-void scheduler(void)
+void
+scheduler(void)
 {
-#ifdef SCHED_RR
   struct proc *p;
-#elif defined(SCHED_STRIDE)
-  struct proc *p;
-  struct proc *selected_proc;
-#endif
-
   struct cpu *c = mycpu();
   c->proc = 0;
 
@@ -428,60 +438,32 @@ void scheduler(void)
     // Enable interrupts on this processor.
     sti();
 
-    // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-#ifdef SCHED_RR
-    // Round Robin Scheduler
+
+    // Update stride scheduling variables
+    //update_stride_variables();
+
+    struct proc *nextproc = 0;
+    // Update global pass each tick
+    strideglobalinfo.global_pass += strideglobalinfo.global_stride;
     for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     {
       if (p->state != RUNNABLE)
         continue;
 
-      // Switch to chosen process
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
-
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
-
-      // Process is done running for now
-      c->proc = 0;
-    }
-#elif defined(SCHED_STRIDE)
-    global_pass += global_stride; // Increment global pass each tick
-    selected_proc = 0;
-
-    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    {
-      if (p->state != RUNNABLE)
-        continue;
-
-      // Select the process with the smallest pass value
-      // if (selected_proc == 0 || p->pass < selected_proc->pass)
-      // {
-      //   selected_proc = p;
-      // }
-
-      // Select process with lowest pass, using run_ticks and pid for tie-breaking
-      if (selected_proc == 0 ||
-          p->pass < selected_proc->pass ||   // Primary: Lowest pass value
-          (p->pass == selected_proc->pass && // Secondary: Lower runtime in ticks
-           p->run_ticks < selected_proc->run_ticks) ||
-          (p->pass == selected_proc->pass && // Tertiary: Lower PID for identical pass and runtime
-           p->run_ticks == selected_proc->run_ticks &&
-           p->pid < selected_proc->pid))
+      // Select process with lowest pass value
+      if (nextproc == 0 ||
+          p->pass < nextproc->pass ||
+          (p->pass == nextproc->pass && p->run_ticks < nextproc->run_ticks) ||
+          (p->pass == nextproc->pass && p->run_ticks == nextproc->run_ticks && p->pid < nextproc->pid))
       {
-        selected_proc = p;
+        nextproc = p;
       }
     }
 
-    // Run the selected process if found
-    if (selected_proc != 0)
+    if (nextproc != 0)
     {
-      p = selected_proc;
-      p->pass += p->stride; // increment pass by stride
-      p->run_ticks++;       // Increment the number of ticks the process has run
+      p = nextproc;
 
       // Switch to the chosen process
       c->proc = p;
@@ -491,20 +473,16 @@ void scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
-      // Update remain when the process is temporarily removed
-      if (p->state != RUNNABLE)
-      {
-        p->remain = p->pass - global_pass;
-      }
+      // Update pass and run_ticks for the selected process
+      p->pass += p->stride;
+      p->run_ticks++; // Increment the total ticks for this process
 
       // Process is done running for now
       c->proc = 0;
     }
-#endif
 
     release(&ptable.lock);
-
-  } // end forever
+  }
 }
 
 // Enter scheduler.  Must hold only ptable.lock
@@ -615,8 +593,7 @@ wakeup1(void *chan)
     if (p->state == SLEEPING && p->chan == chan)
     {
       p->state = RUNNABLE;
-      p->pass = global_pass + p->remain; // Adjust pass based on remain
-      p->remain = 0;                     // Reset remain after rejoining
+      p->pass = strideglobalinfo.global_pass + p->remain; // Adjust pass
     }
   }
 }

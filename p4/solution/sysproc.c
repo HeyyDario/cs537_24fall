@@ -7,6 +7,19 @@
 #include "mmu.h"
 #include "proc.h"
 #include "pstat.h"
+#include "spinlock.h"
+
+extern struct {
+  struct spinlock lock;
+  struct proc proc[NPROC];
+} ptable;
+
+extern struct {
+  int global_tickets;
+  int global_stride;
+  int global_pass;
+} strideglobalinfo;
+
 
 int
 sys_fork(void)
@@ -91,129 +104,70 @@ sys_uptime(void)
   return xticks;
 }
 
-int sys_settickets_pid(void) {
-    int pid, new_tickets;
-
-    if (argint(0, &pid) < 0 || argint(1, &new_tickets) < 0 || new_tickets < 1)
-        return -1;
-
-    struct proc *p;
-    // struct spinlock *lock = getptablelock();
-    // acquire(lock);
-    acquire(&tickslock);
-    
-    for (p = getptable(); p < getptable() + NPROC; p++) {
-        if (p->pid == pid) {
-            // Remove the current process's tickets from global tickets
-            int global_tickets = get_global_tickets();
-            global_tickets -= p->tickets;
-            set_global_tickets(global_tickets);
-
-            // Recalculate global_stride based on the new total tickets
-            if (global_tickets > 0) {
-                set_global_stride(STRIDE1 / global_tickets);
-            } else {
-                set_global_stride(0);
-            }
-
-            // Update the process's tickets and recalculate stride and pass
-            int old_stride = p->stride;        // Store the old stride value
-            p->tickets = new_tickets;          // Update tickets
-            p->stride = STRIDE1 / new_tickets; // Recalculate the new stride
-
-            // Scale remain by new_stride / old_stride to adjust pass correctly
-            if (old_stride > 0) {
-                p->remain = (p->remain * p->stride) / old_stride;
-            }
-
-            // Update the process's pass using the adjusted remain value
-            p->pass = get_global_pass() + p->remain;
-
-            // Add the updated tickets back to global tickets and recalculate global stride
-            global_tickets += new_tickets;
-            set_global_tickets(global_tickets);
-            set_global_stride(STRIDE1 / global_tickets);
-
-            // release(lock);
-            release(&tickslock);
-            return 0;
-        }
-    }
-    // release(lock);
-    release(&tickslock);
-    return -1; // Process not found
-}
-
+// System call to set the ticket count for the current process
 int sys_settickets(void) {
-    int n;
-    struct proc *p = myproc(); // Get the current process
-    //struct spinlock *lock = getptablelock();
+  int n;
 
-    if (argint(0, &n) < 0)
-        return -1;
+  // Retrieve the argument passed to the system call
+  if (argint(0, &n) < 0) {
+    return -1; // Error if no valid argument
+  }
 
-    // Clamp n to the allowed ticket range
-    if (n < 1)
-        n = 8;               // Default to 8 if n is less than 1
-    else if (n > (1 << 5))   // Maximum of 32 tickets
-        n = 1 << 5;
+  // Clamp n to be within the allowed range
+  if (n < 1) {
+    n = 8; // Default ticket count if n < 1
+  } else if (n > (1 << 5)) {
+    n = 1 << 5; // Max ticket count is 32
+  }
 
-    //acquire_ptable_lock(); // Lock ptable
-    
-    //acquire(lock);
-    acquire(&tickslock);
+  struct proc *p = myproc();
 
-    // Update global tickets and process tickets
-    int global_tickets = get_global_tickets();
-    global_tickets -= p->tickets;   // Remove current tickets from global count
-    p->tickets = n;                 // Set new ticket value
-    global_tickets += p->tickets;   // Add new tickets to global count
-    set_global_tickets(global_tickets);
+  acquire(&ptable.lock);
 
-    // Recalculate stride and pass based on new ticket count
-    p->stride = STRIDE1 / p->tickets;
-    if (global_tickets > 0)
-        set_global_stride(STRIDE1 / global_tickets);
+  // Update global tickets by removing old ticket count and adding the new count
+  strideglobalinfo.global_tickets -= p->tickets;
+  p->tickets = n;
+  strideglobalinfo.global_tickets += p->tickets;
 
-    // Adjust remain and pass values
-    int old_stride = p->stride;
-    if (old_stride > 0) {
-        p->remain = (p->remain * p->stride) / old_stride;
-    }
-    p->pass = get_global_pass() + p->remain;
+  // Recalculate the process's stride based on its new ticket count
+  p->stride = STRIDE1 / p->tickets;
 
-    //release_ptable_lock(); // Unlock ptable
-    release(&tickslock);
-    return 0;
+  // Update global stride after changing total tickets
+  if (strideglobalinfo.global_tickets > 0) {
+    strideglobalinfo.global_stride = STRIDE1 / strideglobalinfo.global_tickets;
+  } else {
+    strideglobalinfo.global_stride = 0;
+  }
+
+  release(&ptable.lock);
+
+  return 0; // Success
 }
 
 int sys_getpinfo(void) {
-    struct pstat *ps;
-    //struct spinlock *lock = getptablelock();
+  struct pstat *ps;
 
-    // Retrieve the pointer to the pstat structure passed from user space
-    if (argptr(0, (void*)&ps, sizeof(*ps)) < 0)
-        return -1;
+  // Retrieve the pointer to the pstat structure passed from user space
+  if (argptr(0, (void*)&ps, sizeof(*ps)) < 0) {
+    return -1; // Return an error if the argument pointer is invalid
+  }
 
-    //acquire_ptable_lock(); // Lock the process table
-    //acquire(lock);
-    acquire(&tickslock);
+  acquire(&ptable.lock);  // Acquire the process table lock
 
-    struct proc *p;
-    int i;
-    for (i = 0, p = getptable(); p < getptable() + NPROC; i++, p++) {
-        ps->inuse[i] = (p->state != UNUSED) ? 1 : 0;
-        ps->tickets[i] = p->tickets;
-        ps->pid[i] = p->pid;
-        ps->pass[i] = p->pass;
-        ps->remain[i] = p->remain;
-        ps->stride[i] = p->stride;
-        ps->rtime[i] = p->run_ticks; // Total running time (ticks)
-    }
+  struct proc *p;
+  int i;
+  for (i = 0, p = ptable.proc; p < &ptable.proc[NPROC]; i++, p++) {
+    ps->inuse[i] = (p->state != UNUSED) ? 1 : 0;  // Check if the process slot is in use
+    ps->tickets[i] = p->tickets;
+    ps->pid[i] = p->pid;
+    ps->pass[i] = p->pass;
+    ps->remain[i] = p->remain;
+    ps->stride[i] = p->stride;
+    ps->rtime[i] = p->run_ticks; // Total running time (ticks)
+  }
 
-    //release_ptable_lock(); // Unlock the process table
-    release(&tickslock);
-    return 0; // Success
+  release(&ptable.lock);  // Release the process table lock
+  return 0;  // Success
 }
 
 
