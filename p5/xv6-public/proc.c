@@ -91,6 +91,14 @@ found:
 
   release(&ptable.lock);
 
+  // Initialize wmap_data
+  p->wmap_data.total_mmaps = 0;
+  for (int i = 0; i < MAX_WMMAP_INFO; i++) {
+    p->wmap_data.addr[i] = 0;
+    p->wmap_data.length[i] = 0;
+    p->wmap_data.n_loaded_pages[i] = 0;
+  }
+
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
     p->state = UNUSED;
