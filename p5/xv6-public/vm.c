@@ -54,6 +54,12 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
   return &pgtab[PTX(va)];
 }
 
+// Wrapper for walkpgdir to be used outside of vm.c
+pte_t *get_pte(pde_t *pgdir, const void *va, int alloc) {
+    return walkpgdir(pgdir, va, alloc);
+}
+
+
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa. va and size might not
 // be page-aligned.

@@ -14,6 +14,7 @@
 
 #define PAGE_SIZE 4096
 uint wmap(uint addr, int length, int flags, int fd);
+int wunmap(uint addr);
 
 int sys_fork(void)
 {
@@ -110,7 +111,8 @@ int sys_wmap(void)
   return (int)wmap(addr, length, flags, fd);
 }
 
-uint wmap(uint addr, int length, int flags, int fd) {
+uint wmap(uint addr, int length, int flags, int fd) 
+{
     struct proc *p = myproc();
 
     // Validate flags: Must include MAP_FIXED and MAP_SHARED
@@ -150,4 +152,80 @@ uint wmap(uint addr, int length, int flags, int fd) {
 
     // Return the starting address of the mapping
     return addr;
+}
+
+int sys_wunmap(void) 
+{
+    uint addr;
+
+    if (argint(0, (int *)&addr) < 0) {
+        return FAILED;
+    }
+
+    return wunmap(addr);
+}
+
+int wunmap(uint addr) 
+{
+    struct proc *p = myproc();
+    int index = -1;
+
+    // Validate the address (must be page-aligned)
+    if (addr % PGSIZE != 0) {
+        return FAILED;
+    }
+
+    // Find the mapping in wmap_data
+    for (int i = 0; i < p->wmap_data.total_mmaps; i++) {
+        if (p->wmap_data.addr[i] == addr) {
+            index = i;
+            break;
+        }
+    }
+
+    // If the address is not found, return an error
+    if (index == -1) {
+        return FAILED;
+    }
+
+    uint start = p->wmap_data.addr[index];
+    uint length = p->wmap_data.length[index];
+    int flags = (p->wmap_data.addr[index] & MAP_ANONYMOUS) ? MAP_ANONYMOUS : 0;
+
+    // Write back to the file if it's a file-backed mapping with MAP_SHARED
+    if (!(flags & MAP_ANONYMOUS)) {
+        struct file *f = p->ofile[index];
+        for (uint va = start; va < start + length; va += PGSIZE) {
+            pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
+            if (!pte || !(*pte & PTE_P)) {
+                continue;
+            }
+
+            char *mem = P2V(PTE_ADDR(*pte));
+            filewrite(f, mem, PGSIZE);
+        }
+    }
+
+    // Unmap the pages and free the physical memory
+    for (uint va = start; va < start + length; va += PGSIZE) {
+        pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
+        if (!pte || !(*pte & PTE_P)) {
+            continue;
+        }
+
+        uint pa = PTE_ADDR(*pte);
+        char *mem = P2V(pa);
+        kfree(mem);
+        *pte = 0;
+    }
+
+    // Remove the mapping from wmap_data
+    for (int i = index; i < p->wmap_data.total_mmaps - 1; i++) {
+        p->wmap_data.addr[i] = p->wmap_data.addr[i + 1];
+        p->wmap_data.length[i] = p->wmap_data.length[i + 1];
+        p->wmap_data.n_loaded_pages[i] = p->wmap_data.n_loaded_pages[i + 1];
+    }
+    p->wmap_data.total_mmaps--;
+
+    return SUCCESS;
 }

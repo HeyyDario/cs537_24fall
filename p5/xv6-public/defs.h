@@ -9,6 +9,8 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+typedef uint pte_t;
+
 
 // bio.c
 void            binit(void);
@@ -186,6 +188,8 @@ void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
 int             map_pages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
+pte_t*          get_pte(pde_t *pgdir, const void *va, int alloc);
+
 
 
 // number of elements in fixed-size array
