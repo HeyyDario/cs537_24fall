@@ -15,6 +15,7 @@
 #define PAGE_SIZE 4096
 uint wmap(uint addr, int length, int flags, int fd);
 int wunmap(uint addr);
+uint va2pa(uint va);
 
 int sys_fork(void)
 {
@@ -111,22 +112,24 @@ int sys_wmap(void)
   return (int)wmap(addr, length, flags, fd);
 }
 
-uint wmap(uint addr, int length, int flags, int fd) 
-{
+uint wmap(uint addr, int length, int flags, int fd) {
     struct proc *p = myproc();
 
     // Validate flags: Must include MAP_FIXED and MAP_SHARED
     if (!(flags & MAP_FIXED) || !(flags & MAP_SHARED)) {
+        cprintf("wmap: Invalid flags 0x%x\n", flags);
         return FAILED;
     }
 
     // Validate address: Must be in the range [0x60000000, 0x80000000) and page-aligned
     if (addr < 0x60000000 || addr >= 0x80000000 || addr % PAGE_SIZE != 0) {
+        cprintf("wmap: Invalid address 0x%x\n", addr);
         return FAILED;
     }
 
     // Validate length: Must be greater than 0 and a multiple of page size
     if (length <= 0 || length % PAGE_SIZE != 0) {
+        cprintf("wmap: Invalid length %d\n", length);
         return FAILED;
     }
 
@@ -134,12 +137,14 @@ uint wmap(uint addr, int length, int flags, int fd)
     if (!(flags & MAP_ANONYMOUS)) {
         struct file *f = p->ofile[fd];
         if (!f || f->type != FD_INODE || !(f->readable && f->writable)) {
+            cprintf("wmap: Invalid file descriptor %d\n", fd);
             return FAILED;
         }
     }
 
     // Check if there is space for another mapping
     if (p->wmap_data.total_mmaps >= MAX_WMMAP_INFO) {
+        cprintf("wmap: No space for more mappings\n");
         return FAILED;
     }
 
@@ -149,6 +154,8 @@ uint wmap(uint addr, int length, int flags, int fd)
     p->wmap_data.length[index] = length;
     p->wmap_data.n_loaded_pages[index] = 0;
     p->wmap_data.total_mmaps++;
+
+    cprintf("wmap: Added mapping at index %d, addr 0x%x, length %d\n", index, addr, length);
 
     // Return the starting address of the mapping
     return addr;
@@ -229,3 +236,64 @@ int wunmap(uint addr)
 
     return SUCCESS;
 }
+
+int sys_va2pa(void) {
+    uint va;
+    if (argint(0, (int *)&va) < 0) {
+        return -1;
+    }
+    return (int)va2pa(va);
+}
+
+// Translate a virtual address to a physical address
+uint va2pa(uint va) {
+    struct proc *p = myproc();
+    pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
+
+    if (!pte) {
+        cprintf("va2pa: PTE not found for va 0x%x\n", va);
+        return -1;
+    }
+
+    // Check if the PTE is present
+    if (!(*pte & PTE_P)) {
+        cprintf("va2pa: Page not present for va 0x%x\n", va);
+        return -1;
+    }
+
+    // Ensure the address is not in a pre-mapped or kernel region
+    if (va >= KERNBASE) {
+        cprintf("va2pa: Address 0x%x is in a restricted or kernel region\n", va);
+        return -1;
+    }
+
+    // Compute the physical address with the page offset
+    uint pa = PTE_ADDR(*pte) | (va & 0xFFF);
+    cprintf("va2pa: Translated va 0x%x to pa 0x%x\n", va, pa);
+    return pa;
+}
+
+int
+sys_getwmapinfo(void) 
+{
+    struct wmapinfo *wminfo;
+
+    // Fetch the user-provided pointer to wmapinfo structure
+    if (argptr(0, (void *)&wminfo, sizeof(*wminfo)) < 0) {
+        return -1;
+    }
+
+    struct proc *curproc = myproc();
+
+    // Populate the wmapinfo structure
+    wminfo->total_mmaps = curproc->wmap_data.total_mmaps;
+
+    for (int i = 0; i < wminfo->total_mmaps; i++) {
+        wminfo->addr[i] = curproc->wmap_data.addr[i];
+        wminfo->length[i] = curproc->wmap_data.length[i];
+        wminfo->n_loaded_pages[i] = curproc->wmap_data.n_loaded_pages[i];
+    }
+
+    return 0;
+}
+
