@@ -8,6 +8,22 @@
 #include "traps.h"
 #include "spinlock.h"
 
+struct file
+{
+  enum
+  {
+    FD_NONE,
+    FD_PIPE,
+    FD_INODE
+  } type;
+  int ref; // reference count
+  char readable;
+  char writable;
+  struct pipe *pipe;
+  struct inode *ip;
+  uint off;
+};
+
 #define PAGE_SIZE 4096
 
 // Interrupt descriptor table (shared by all CPUs).
@@ -79,42 +95,62 @@ void trap(struct trapframe *tf)
             cpuid(), tf->cs, tf->eip);
     lapiceoi();
     break;
-  case T_PGFLT:
-  {
-    uint fault_addr = rcr2(); // Get the faulting address
+  case T_PGFLT: {
+    uint fault_addr = rcr2(); // Address causing the fault
     struct proc *p = myproc();
 
-    // Check if the fault address is part of any wmap region
-    for (int i = 0; i < p->wmap_data.total_mmaps; i++)
-    {
-      uint start = p->wmap_data.addr[i];
-      uint end = start + p->wmap_data.length[i];
-      if (fault_addr >= start && fault_addr < end)
-      {
-        // Allocate a new physical page
-        char *mem = kalloc();
-        if (!mem)
-        {
-          cprintf("Lazy allocation failed: out of memory\n");
-          p->killed = 1;
-          return;
+    // Find the mapping containing fault_addr
+    for (int i = 0; i < p->wmap_data.total_mmaps; i++) {
+        uint start = p->wmap_data.addr[i];
+        uint end = start + p->wmap_data.length[i];
+
+        // Check if the faulting address falls within this mapping
+        if (fault_addr >= start && fault_addr < end) {
+            uint page_addr = PGROUNDDOWN(fault_addr);
+            char *mem = kalloc();
+            if (!mem) {
+                panic("trap: lazy allocation failed: out of memory");
+            }
+            memset(mem, 0, PGSIZE);
+
+            // Map the page into the process's address space
+            if (map_pages(p->pgdir, (void *)page_addr, PGSIZE, V2P(mem), PTE_W | PTE_U) < 0) {
+                kfree(mem);
+                panic("trap: failed to map page");
+            }
+
+            // Handle file-backed mappings
+            if (!(p->wmap_data.flags[i] & MAP_ANONYMOUS)) {
+                struct file *f = p->ofile[p->wmap_data.fd[i]];
+                cprintf("trap: fd %d -> file pointer %p\n", p->wmap_data.fd[i], f);
+                if (!f) {
+                    cprintf("trap: fd %d has NULL file\n", p->wmap_data.fd[i]);
+                    panic("trap: file not found for file-backed mapping");
+                }
+                int offset = fault_addr - start;
+                f->off = offset;
+                int bytes_read = fileread(f, mem, PGSIZE);
+                if (bytes_read < 0) {
+                    //kfree(mem);
+                    panic("trap: failed to read file");
+                }
+                
+                // Zero out the remainder of the page if the file does not fully occupy it
+                if (bytes_read < PGSIZE) {
+                    memset(mem + bytes_read, 0, PGSIZE - bytes_read);
+                }
+            }
+            p->wmap_data.n_loaded_pages[i]++;
+            lcr3(V2P(p->pgdir)); // Flush the TLB
+            return;
         }
-
-        // Zero out the page and map it to the faulting address
-        memset(mem, 0, PAGE_SIZE);
-        map_pages(p->pgdir, (void *)PGROUNDDOWN(fault_addr), PAGE_SIZE, V2P(mem), PTE_W | PTE_U);
-
-        // Update the loaded pages count for the mapping
-        p->wmap_data.n_loaded_pages[i]++;
-        return;
-      }
     }
 
-    // If the address is not part of any mapping, it's a segmentation fault
+    // Address not found in mappings - segmentation fault
     cprintf("Segmentation Fault at address 0x%x\n", fault_addr);
     p->killed = 1;
-    break;
-  }
+    return;
+}
   // PAGEBREAK: 13
   default:
     if (myproc() == 0 || (tf->cs & 3) == 0)

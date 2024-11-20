@@ -127,17 +127,38 @@ uint wmap(uint addr, int length, int flags, int fd) {
         return FAILED;
     }
 
-    // Validate length: Must be greater than 0 and a multiple of page size
-    if (length <= 0 || length % PAGE_SIZE != 0) {
+    // Validate length: Must be greater than 0
+    if (length <= 0) {
         cprintf("wmap: Invalid length %d\n", length);
         return FAILED;
     }
 
+    // Validate that mapping does not exceed allowed address space
+    if (addr + length > 0x80000000) {
+        cprintf("wmap: Mapping exceeds allowed address space\n");
+        return FAILED;
+    }
+
     // Validate file descriptor for file-backed mapping (if not anonymous)
-    if (!(flags & MAP_ANONYMOUS)) {
-        struct file *f = p->ofile[fd];
-        if (!f || f->type != FD_INODE || !(f->readable && f->writable)) {
-            cprintf("wmap: Invalid file descriptor %d\n", fd);
+    // if (!(flags & MAP_ANONYMOUS)) {
+    //     struct file *f = p->ofile[fd];
+    //     if (!f || f->type != FD_INODE || !(f->readable && f->writable)) {
+    //         cprintf("wmap: Invalid file descriptor %d\n", fd);
+    //         return FAILED;
+    //     }
+    // }
+
+    // Check for overlapping mappings
+    uint new_start = addr;
+    uint new_end = addr + length;
+
+    for (int i = 0; i < p->wmap_data.total_mmaps; i++) {
+        uint existing_start = p->wmap_data.addr[i];
+        uint existing_end = existing_start + p->wmap_data.length[i];
+
+        // Check for overlap
+        if (!(new_end <= existing_start || new_start >= existing_end)) {
+            cprintf("wmap: Mapping overlaps with existing mapping at index %d\n", i);
             return FAILED;
         }
     }
@@ -150,9 +171,25 @@ uint wmap(uint addr, int length, int flags, int fd) {
 
     // Record the mapping in wmap_data
     int index = p->wmap_data.total_mmaps;
+
+    if (!(flags & MAP_ANONYMOUS)) {
+        struct file *f = p->ofile[fd];
+        if (!f || f->type != FD_INODE || !(f->readable)) {
+            cprintf("wmap: Invalid file descriptor %d\n", fd);
+            return FAILED;
+        }
+        cprintf("wmap: Incrementing ref count for fd %d\n", fd);
+        filedup(f); // Increment the file reference count
+        p->wmap_data.fd[index] = fd; // Assign file descriptor
+    } else {
+        p->wmap_data.fd[index] = -1; // No file for anonymous mappings
+    }
+
     p->wmap_data.addr[index] = addr;
     p->wmap_data.length[index] = length;
     p->wmap_data.n_loaded_pages[index] = 0;
+    p->wmap_data.flags[index] = flags;
+    //p->wmap_data.fd[index] = (flags & MAP_ANONYMOUS) ? -1 : fd;
     p->wmap_data.total_mmaps++;
 
     cprintf("wmap: Added mapping at index %d, addr 0x%x, length %d\n", index, addr, length);
@@ -160,6 +197,7 @@ uint wmap(uint addr, int length, int flags, int fd) {
     // Return the starting address of the mapping
     return addr;
 }
+
 
 int sys_wunmap(void) 
 {
@@ -202,6 +240,9 @@ int wunmap(uint addr)
     // Write back to the file if it's a file-backed mapping with MAP_SHARED
     if (!(flags & MAP_ANONYMOUS)) {
         struct file *f = p->ofile[index];
+        if (f) {
+            fileclose(f); // Decrement reference count for file descriptor
+        }
         for (uint va = start; va < start + length; va += PGSIZE) {
             pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
             if (!pte || !(*pte & PTE_P)) {
@@ -231,6 +272,8 @@ int wunmap(uint addr)
         p->wmap_data.addr[i] = p->wmap_data.addr[i + 1];
         p->wmap_data.length[i] = p->wmap_data.length[i + 1];
         p->wmap_data.n_loaded_pages[i] = p->wmap_data.n_loaded_pages[i + 1];
+        p->wmap_data.flags[i] = p->wmap_data.flags[i + 1];
+        p->wmap_data.fd[i] = p->wmap_data.fd[i + 1];
     }
     p->wmap_data.total_mmaps--;
 
@@ -262,7 +305,7 @@ uint va2pa(uint va) {
     }
 
     // Ensure the address is not in a pre-mapped or kernel region
-    if (va >= KERNBASE) {
+    if (va >= KERNBASE || va < MMAPBASE) {
         cprintf("va2pa: Address 0x%x is in a restricted or kernel region\n", va);
         return -1;
     }
