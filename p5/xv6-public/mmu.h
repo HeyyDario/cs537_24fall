@@ -1,6 +1,8 @@
 // This file contains definitions for the
 // x86 memory management unit (MMU).
 
+#define PTE_ORIG_RO 0x400  // Use bit 9 to mark originally read-only
+
 // Eflags register
 #define FL_IF           0x00000200      // Interrupt Enable
 
@@ -86,6 +88,8 @@ struct segdesc {
 
 #define PTXSHIFT        12      // offset of PTX in a linear address
 #define PDXSHIFT        22      // offset of PDX in a linear address
+#define PGSHIFT         12 // Page size is 2^12 = 4096 bytes
+
 
 #define PGROUNDUP(sz)  (((sz)+PGSIZE-1) & ~(PGSIZE-1))
 #define PGROUNDDOWN(a) (((a)) & ~(PGSIZE-1))
@@ -95,6 +99,8 @@ struct segdesc {
 #define PTE_W           0x002   // Writeable
 #define PTE_U           0x004   // User
 #define PTE_PS          0x080   // Page Size
+#define PTE_COW 0x200  // Use bit 9 for the Copy-On-Write flag
+
 
 // Address in page table or page directory entry
 #define PTE_ADDR(pte)   ((uint)(pte) & ~0xFFF)

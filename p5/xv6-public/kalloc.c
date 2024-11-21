@@ -23,6 +23,39 @@ struct {
   struct run *freelist;
 } kmem;
 
+// Define the reference count array
+#define MAX_PFN (PHYSTOP / PGSIZE) // Max number of physical frames
+static uchar ref_counts[MAX_PFN]; // 1-byte ref count for each frame
+
+// Helper to get the reference count for a physical address
+static int pa_to_pfn(uint pa) {
+    if (pa < V2P(end) || pa >= PHYSTOP)
+        panic("pa_to_pfn: invalid physical address");
+    return (pa >> PGSHIFT); // PFN is physical address divided by page size
+}
+
+void incref(uint pa) {
+    int pfn = pa_to_pfn(pa);
+    ref_counts[pfn]++;
+}
+
+void decref(uint pa) {
+    int pfn = pa_to_pfn(pa);
+    if (ref_counts[pfn] < 0) {
+        cprintf("ERROR: decref called on pa=0x%x with invalid ref_count=%d\n", pa, ref_counts[pfn]);
+        return; // Avoid crashing; adjust logic instead.
+    }
+    ref_counts[pfn]--;
+    if (ref_counts[pfn] == 0) {
+        kfree(P2V(pa)); // Free the physical page when no references remain
+    }
+}
+
+int getref(uint pa) {
+    int pfn = pa_to_pfn(pa);
+    return ref_counts[pfn];
+}
+
 // Initialization happens in two phases.
 // 1. main() calls kinit1() while still using entrypgdir to place just
 // the pages mapped by entrypgdir on free list.
@@ -63,6 +96,8 @@ kfree(char *v)
 
   if((uint)v % PGSIZE || v < end || V2P(v) >= PHYSTOP)
     panic("kfree");
+
+  // if (getref(V2P(v))) return;
 
   // Fill with junk to catch dangling refs.
   memset(v, 1, PGSIZE);

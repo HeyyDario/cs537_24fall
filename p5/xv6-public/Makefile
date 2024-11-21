@@ -186,6 +186,8 @@ UPROGS=\
 	_test_protection\
 	_va2pa_test\
 	_getwmapinfo_test\
+	_cowtest\
+	_test_22\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)
