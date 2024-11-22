@@ -241,11 +241,22 @@ int fork(void)
       uint parent_pa = PTE_ADDR(*pte); // parent pa
       int flags = PTE_FLAGS(*pte); // parent flags
 
-      // Mark pages as COW in both parent and child
+      if(np->wmap_data.flags[i] & MAP_SHARED)
+      {
+        // shared mapping: directly map the same physical page in the child
+        if (map_pages(np->pgdir, (void *)addr, PGSIZE, parent_pa, flags) < 0)
+        {
+          freevm(np->pgdir);
+          np->pgdir = 0;
+          np->state = UNUSED;
+          return -1;
+        }
+      } else {
+        // mark pages as COW in both parent and child
       if (flags & PTE_W)
       {
-        *pte &= ~PTE_W;  // Clear write permission in parent
-        *pte |= PTE_COW; // Mark as COW in parent
+        *pte &= ~PTE_W;  // clear write permission in parent
+        *pte |= PTE_COW; // mark as COW in parent
       }
 
       // Map the page in the child's page table
@@ -259,6 +270,7 @@ int fork(void)
 
       // Increment reference count for shared page
       incref(parent_pa);
+      }
     }
   }
 

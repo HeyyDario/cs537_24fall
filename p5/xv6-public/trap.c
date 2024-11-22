@@ -173,7 +173,7 @@ void trap(struct trapframe *tf)
       } // end for
     } // end if (!pte || !(*pte & PTE_P))
 
-      // Handle Copy-On-Write
+      // Step 2: Handle Copy-On-Write
       if (*pte & PTE_COW)
       {
         uint pa = PTE_ADDR(*pte); // Extract physical address
@@ -185,10 +185,10 @@ void trap(struct trapframe *tf)
           {
             panic("Page fault: out of memory during COW handling\n");
           }
-
+          // Copy contents of the original page to the new page
           memmove(new_page, (char *)P2V(PTE_ADDR(*pte)), PGSIZE);
           // Map the new page and restore write permissions
-          // map_pages(p->pgdir, (void *)fault_addr, PGSIZE, V2P(new_page), PTE_W | PTE_U);
+          //map_pages(p->pgdir, (void *)fault_addr, PGSIZE, V2P(new_page), PTE_W | PTE_U);
           uint new_pa = V2P(new_page); // Get the physical address of the newly allocated page
           int flags = PTE_FLAGS(*pte);
           flags &= ~PTE_COW; // Clear the PTE_COW flag
