@@ -376,24 +376,61 @@ int wunmap(uint addr)
     uint length = p->wmap_data.length[index];
     int flags = p->wmap_data.flags[index];
 
-    // Write back to the file if it's a file-backed mapping with MAP_SHARED
-    // **Handle File-Backed Mappings with MAP_SHARED**
-    if (!(flags & MAP_ANONYMOUS) && (flags & MAP_SHARED))
-    {
-        struct file *f = p->ofile[p->wmap_data.fd[index]];
-        if (f)
+    for (uint va = addr; va < addr + length; va += PGSIZE) {
+        pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
+        if (!pte || !(*pte & PTE_P)) {
+            continue; // skip page not present
+        }
+
+        uint pa = PTE_ADDR(*pte); // Get the physical address
+
+        if (!(flags & MAP_ANONYMOUS) && (flags & MAP_SHARED))
         {
-            for (uint va = start; va < start + length; va += PGSIZE)
+            struct file *f = p->ofile[p->wmap_data.fd[index]];
+            if(f)
             {
-                pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
-                if (pte && (*pte & PTE_P))
-                {
-                    char *pa = P2V(PTE_ADDR(*pte));
-                    filewrite(f, pa, PGSIZE); // Write modified pages back to the file
+                // Write back to the file
+                char *mem = P2V(pa);
+                int offset = va - start; // Offset in the file
+                ilock(f->ip);
+                int n = writei(f->ip, mem, offset, PGSIZE);
+                iunlock(f->ip);
+                if (n < 0) {
+                    cprintf("wunmap: Write back failed for address 0x%x\n", va);
                 }
             }
         }
+
+        decref(pa);               // Decrement reference count
+        if (getref(pa) == 0) {
+            kfree(P2V(pa)); // Free the physical page if reference count is 0
+        }
+
+        // Clear the PTE entry for this process
+        *pte = 0;
     }
+
+    // Flush TLB for the process
+    lcr3(V2P(p->pgdir));
+
+    // write back to the file if it's a file-backed mapping with MAP_SHARED
+    // handle file-facked mappings with MAP_SHARED
+    // if (!(flags & MAP_ANONYMOUS) && (flags & MAP_SHARED))
+    // {
+    //     struct file *f = p->ofile[p->wmap_data.fd[index]];
+    //     if (f)
+    //     {
+    //         for (uint va = start; va < start + length; va += PGSIZE)
+    //         {
+    //             pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
+    //             if (pte && (*pte & PTE_P))
+    //             {
+    //                 char *pa = P2V(PTE_ADDR(*pte));
+    //                 filewrite(f, pa, PGSIZE); // Write modified pages back to the file
+    //             }
+    //         }
+    //     }
+    // }
     // if (!(flags & MAP_ANONYMOUS))
     // {
     //     struct file *f = p->ofile[index];
@@ -415,32 +452,17 @@ int wunmap(uint addr)
     //     }
     // }
 
-    // Unmap the pages and free the physical memory
+    // // Handle Memory Deallocation for Both Types
     // for (uint va = start; va < start + length; va += PGSIZE)
     // {
     //     pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
-    //     if (!pte || !(*pte & PTE_P))
+    //     if (pte && (*pte & PTE_P))
     //     {
-    //         continue;
+    //         char *pa = P2V(PTE_ADDR(*pte));
+    //         kfree(pa); // Free the physical memory
+    //         *pte = 0;  // Invalidate the page table entry
     //     }
-
-    //     uint pa = PTE_ADDR(*pte);
-    //     char *mem = P2V(pa);
-    //     kfree(mem);
-    //     *pte = 0;
     // }
-
-    // **Handle Memory Deallocation for Both Types**
-    for (uint va = start; va < start + length; va += PGSIZE)
-    {
-        pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
-        if (pte && (*pte & PTE_P))
-        {
-            char *pa = P2V(PTE_ADDR(*pte));
-            kfree(pa); // Free the physical memory
-            *pte = 0;  // Invalidate the page table entry
-        }
-    }
 
     // Remove the mapping from wmap_data
     for (int i = index; i < p->wmap_data.total_mmaps - 1; i++)

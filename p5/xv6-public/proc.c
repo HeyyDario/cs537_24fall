@@ -203,7 +203,7 @@ int fork(void)
   }
 
   // Copy process state from proc.
-  if ((np->pgdir = old_copyuvm(curproc->pgdir, curproc->sz)) == 0)
+  if ((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0)
   {
     kfree(np->kstack);
     np->kstack = 0;
@@ -213,6 +213,7 @@ int fork(void)
   np->sz = curproc->sz;
   np->parent = curproc;
   *np->tf = *curproc->tf;
+  cprintf("\n");
 
   // Copy wmap_data from parent to child
   np->wmap_data.total_mmaps = curproc->wmap_data.total_mmaps;
@@ -223,29 +224,43 @@ int fork(void)
     np->wmap_data.length[i] = curproc->wmap_data.length[i];
     np->wmap_data.flags[i] = curproc->wmap_data.flags[i];
     np->wmap_data.fd[i] = curproc->wmap_data.fd[i];
+    if (!(np->wmap_data.flags[i] & MAP_ANONYMOUS))
+    {
+      filedup(curproc->ofile[curproc->wmap_data.fd[i]]);
+    }
     np->wmap_data.n_loaded_pages[i] = curproc->wmap_data.n_loaded_pages[i];
+    uint start = curproc->wmap_data.addr[i];
+    uint length = curproc->wmap_data.length[i];
+    for (uint addr = start; addr < start + length; addr += PGSIZE)
+    {
+      pte_t *pte = get_pte(curproc->pgdir, (void *)addr, 0); // parent pte
+      if (!pte || !(*pte & PTE_P))
+      {
+        continue; // skip unmapped pages
+      }
+      uint parent_pa = PTE_ADDR(*pte); // parent pa
+      int flags = PTE_FLAGS(*pte); // parent flags
+
+      // Mark pages as COW in both parent and child
+      if (flags & PTE_W)
+      {
+        *pte &= ~PTE_W;  // Clear write permission in parent
+        *pte |= PTE_COW; // Mark as COW in parent
+      }
+
+      // Map the page in the child's page table
+      if (map_pages(np->pgdir, (void *)addr, PGSIZE, parent_pa, flags) < 0)
+      {
+        freevm(np->pgdir);
+        np->pgdir = 0;
+        np->state = UNUSED;
+        return -1;
+      }
+
+      // Increment reference count for shared page
+      incref(parent_pa);
+    }
   }
-
-  // // Iterate over the parent's pages and mark them as COW
-  // for (uint i = 0; i < curproc->sz; i += PGSIZE)
-  // {
-  //   pte_t *pte = get_pte(curproc->pgdir, (void *)i, 0);
-  //   if (!pte || !(*pte & PTE_P))
-  //     continue;
-
-  //   uint pa = PTE_ADDR(*pte);
-
-  //   // Mark the page as read-only and set the COW flag
-  //   *pte = (*pte & ~PTE_W) | PTE_COW;
-  //   incref(pa); // Increment the reference count
-
-  //   // Update the child's PTE similarly
-  //   pte_t *child_pte = get_pte(np->pgdir, (void *)i, 1);
-  //   if (!child_pte)
-  //     panic("fork: failed to get child PTE");
-  //   *child_pte = *pte;
-  // }
-  // lcr3(V2P(curproc->pgdir)); // Flush parent's TLB
 
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;

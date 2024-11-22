@@ -383,6 +383,10 @@ old_copyuvm(pde_t *pgdir, uint sz)
       panic("copyuvm: page not present");
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
+
+    //cprintf("PID=%d va=%x pa=%x pte=%x.\n", curproc->pid, i, pa, pte);
+
+
     if((mem = kalloc()) == 0)
       goto bad;
     memmove(mem, (char*)P2V(pa), PGSIZE);

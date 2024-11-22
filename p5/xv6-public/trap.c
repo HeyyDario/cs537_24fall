@@ -101,6 +101,7 @@ void trap(struct trapframe *tf)
     uint vaddr = PGROUNDDOWN(fault_addr);
     struct proc *p = myproc();
     pte_t *pte = get_pte(p->pgdir, (void *)fault_addr, 0);
+    //cprintf("PID=%d va=%x pa=%x pte=%x.\n", p->pid, vaddr, V2P(vaddr), pte);
 
     // Step 1: Check if fault address is part of memory-mapped regions (lazy allocation)
     if (!pte || !(*pte & PTE_P))
@@ -163,7 +164,8 @@ void trap(struct trapframe *tf)
               memset(mem + bytes_read, 0, PGSIZE - bytes_read);
             }
           }
-          cprintf("end file-backed mapping.\n");
+
+          // cprintf("end file-backed mapping.\n");
           p->wmap_data.n_loaded_pages[i]++;
           lcr3(V2P(p->pgdir)); // Flush the TLB
           return;
