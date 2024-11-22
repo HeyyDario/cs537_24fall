@@ -181,7 +181,7 @@ UPROGS=\
 	_usertests\
 	_wc\
 	_zombie\
-	_test_18\
+	#_test_18\
 	# _wmaptest\
 	# _wunmaptest\
 	# _test_protection\

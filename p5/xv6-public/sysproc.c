@@ -372,7 +372,7 @@ int wunmap(uint addr)
     // uint start = p->wmap_data.addr[index];
     // uint length = p->wmap_data.length[index];
     // int flags = (p->wmap_data.addr[index] & MAP_ANONYMOUS) ? MAP_ANONYMOUS : 0;
-    uint start = p->wmap_data.addr[index];
+    //uint start = p->wmap_data.addr[index];
     uint length = p->wmap_data.length[index];
     int flags = p->wmap_data.flags[index];
 
@@ -391,10 +391,11 @@ int wunmap(uint addr)
             {
                 // Write back to the file
                 char *mem = P2V(pa);
-                int offset = va - start; // Offset in the file
-                ilock(f->ip);
-                int n = writei(f->ip, mem, offset, PGSIZE);
-                iunlock(f->ip);
+                // int offset = va - start; // Offset in the file
+                // ilock(f->ip);
+                // int n = writei(f->ip, mem, offset, PGSIZE);
+                // iunlock(f->ip);
+                int n = filewrite(f, mem, PGSIZE); // Write modified page back to file
                 if (n < 0) {
                     cprintf("wunmap: Write back failed for address 0x%x\n", va);
                 }

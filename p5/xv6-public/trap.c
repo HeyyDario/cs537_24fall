@@ -195,13 +195,15 @@ void trap(struct trapframe *tf)
           flags |= PTE_W;    // make the page writable
           // cprintf("COW: fault_addr: x%x, new_pa: x%x, flags: %d with rc %d\n", fault_addr, new_pa, flags, ref_c);
           *pte = new_pa | flags; // Update the PTE to point to the new physical page with updated flags
-          lcr3(V2P(myproc()->pgdir));
+          // map_pages(p->pgdir, (void *)fault_addr, PGSIZE, V2P(new_pa), flags);
+          
           // cprintf("before inc, new_pa ref count: %d\n", getref(new_pa));
           incref(new_pa);
           // cprintf("after inc, new_pa ref count: %d\n", getref(new_pa));
           // cprintf("before dec, pa ref count: %d\n", getref(pa));
           decref(pa);
           // cprintf("after dec, pa ref count: %d\n", getref(pa));
+          lcr3(V2P(myproc()->pgdir));
           cprintf("COW: Allocated new page at 0x%x for fault_addr 0x%x\n", new_pa, fault_addr);
         }
         else if (ref_c == 1) // unshared page
@@ -220,7 +222,7 @@ void trap(struct trapframe *tf)
           cprintf("COW: pa ref count: %d\n", getref(pa));
           panic("COW: RC < 1");
         }
-        lcr3(V2P(p->pgdir));  // Flush the TLB
+        //lcr3(V2P(p->pgdir));  // Flush the TLB
         return; // break before
       } // endif
       // else
