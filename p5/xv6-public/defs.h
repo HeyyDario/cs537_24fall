@@ -192,7 +192,7 @@ int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
 int             map_pages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
 pte_t*          get_pte(pde_t *pgdir, const void *va, int alloc);
-
+pde_t*      old_copyuvm(pde_t *pgdir, uint sz);
 
 
 // number of elements in fixed-size array

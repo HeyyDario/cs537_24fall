@@ -203,7 +203,7 @@ int fork(void)
   }
 
   // Copy process state from proc.
-  if ((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0)
+  if ((np->pgdir = old_copyuvm(curproc->pgdir, curproc->sz)) == 0)
   {
     kfree(np->kstack);
     np->kstack = 0;
@@ -218,6 +218,7 @@ int fork(void)
   np->wmap_data.total_mmaps = curproc->wmap_data.total_mmaps;
   for (int i = 0; i < curproc->wmap_data.total_mmaps; i++)
   {
+    // check if the physical page exist, for loop
     np->wmap_data.addr[i] = curproc->wmap_data.addr[i];
     np->wmap_data.length[i] = curproc->wmap_data.length[i];
     np->wmap_data.flags[i] = curproc->wmap_data.flags[i];

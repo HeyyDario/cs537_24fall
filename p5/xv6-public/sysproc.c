@@ -178,12 +178,36 @@ uint wmap(uint addr, int length, int flags, int fd)
             cprintf("wmap: Invalid file descriptor %d\n", fd);
             return FAILED;
         }
-        filedup(f);                  
-        p->wmap_data.fd[index] = fd;
+        // Duplicate the file
+        struct file *dup_file = filedup(f);
+        if (!dup_file)
+        {
+            // Handle error if duplication fails
+            return -1;
+        }
+
+        // Allocate a new file descriptor for the duplicated file
+        int new_fd = -1;
+        for (int i = 0; i < NOFILE; i++)
+        {
+            if (myproc()->ofile[i] == 0)
+            {
+                myproc()->ofile[i] = dup_file;
+                new_fd = i;
+                break;
+            }
+        }
+
+        if (new_fd == -1)
+        {
+            fileclose(dup_file); // Close the file if no descriptor is available
+            return -1;
+        }
+        p->wmap_data.fd[index] = new_fd;
     }
     else
     {
-        p->wmap_data.fd[index] = -1; 
+        p->wmap_data.fd[index] = -1;
     }
 
     p->wmap_data.addr[index] = addr;
@@ -354,12 +378,16 @@ int wunmap(uint addr)
 
     // Write back to the file if it's a file-backed mapping with MAP_SHARED
     // **Handle File-Backed Mappings with MAP_SHARED**
-    if (!(flags & MAP_ANONYMOUS) && (flags & MAP_SHARED)) {
+    if (!(flags & MAP_ANONYMOUS) && (flags & MAP_SHARED))
+    {
         struct file *f = p->ofile[p->wmap_data.fd[index]];
-        if (f) {
-            for (uint va = start; va < start + length; va += PGSIZE) {
+        if (f)
+        {
+            for (uint va = start; va < start + length; va += PGSIZE)
+            {
                 pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
-                if (pte && (*pte & PTE_P)) {
+                if (pte && (*pte & PTE_P))
+                {
                     char *pa = P2V(PTE_ADDR(*pte));
                     filewrite(f, pa, PGSIZE); // Write modified pages back to the file
                 }
@@ -403,9 +431,11 @@ int wunmap(uint addr)
     // }
 
     // **Handle Memory Deallocation for Both Types**
-    for (uint va = start; va < start + length; va += PGSIZE) {
+    for (uint va = start; va < start + length; va += PGSIZE)
+    {
         pte_t *pte = get_pte(p->pgdir, (void *)va, 0);
-        if (pte && (*pte & PTE_P)) {
+        if (pte && (*pte & PTE_P))
+        {
             char *pa = P2V(PTE_ADDR(*pte));
             kfree(pa); // Free the physical memory
             *pte = 0;  // Invalidate the page table entry
@@ -444,14 +474,14 @@ uint va2pa(uint va)
 
     if (!pte)
     {
-        //cprintf("va2pa: PTE not found for va 0x%x\n", va);
+        // cprintf("va2pa: PTE not found for va 0x%x\n", va);
         return -1;
     }
 
     // Check if the PTE is present
     if (!(*pte & PTE_P))
     {
-        //cprintf("va2pa: Page not present for va 0x%x\n", va);
+        // cprintf("va2pa: Page not present for va 0x%x\n", va);
         return -1;
     }
 
@@ -464,7 +494,7 @@ uint va2pa(uint va)
 
     // Compute the physical address with the page offset
     uint pa = PTE_ADDR(*pte);
-    //cprintf("va2pa: Translated va 0x%x to pa 0x%x\n", va, pa);
+    // cprintf("va2pa: Translated va 0x%x to pa 0x%x\n", va, pa);
     return pa;
 }
 

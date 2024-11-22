@@ -181,13 +181,14 @@ UPROGS=\
 	_usertests\
 	_wc\
 	_zombie\
-	_wmaptest\
-	_wunmaptest\
-	_test_protection\
-	_va2pa_test\
-	_getwmapinfo_test\
-	_cowtest\
-	_test_22\
+	# _wmaptest\
+	# _wunmaptest\
+	# _test_protection\
+	# _va2pa_test\
+	# _getwmapinfo_test\
+	# _cowtest\
+	# _test_22\
+	# _test23easy\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

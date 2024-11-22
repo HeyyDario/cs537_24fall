@@ -43,7 +43,7 @@ void decref(uint pa) {
     int pfn = pa_to_pfn(pa);
     if (ref_counts[pfn] < 0) {
         cprintf("ERROR: decref called on pa=0x%x with invalid ref_count=%d\n", pa, ref_counts[pfn]);
-        return; // Avoid crashing; adjust logic instead.
+        panic("decref: reference count underflow"); // Avoid crashing; adjust logic instead.
     }
     ref_counts[pfn]--;
     if (ref_counts[pfn] == 0) {
@@ -126,6 +126,12 @@ kalloc(void)
     kmem.freelist = r->next;
   if(kmem.use_lock)
     release(&kmem.lock);
+
+  // if (r) {
+  //       // Initialize the reference count for the allocated page
+  //       uint pa = V2P((char*)r);
+  //       ref_counts[pa_to_pfn(pa)] = 1; // Start with ref_count = 1
+  //   }
   return (char*)r;
 }
 
