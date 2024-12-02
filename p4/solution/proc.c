@@ -426,43 +426,56 @@ update_stride_variables(void)
 //   - swtch to start running that process
 //   - eventually that process transfers control
 //       via swtch back to the scheduler.
-void
-scheduler(void)
-{
+void scheduler(void) {
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
 
-  for (;;)
-  {
-    // Enable interrupts on this processor.
-    sti();
-
+  for (;;) {
+    sti(); // Enable interrupts on this processor
     acquire(&ptable.lock);
 
-    // Update stride scheduling variables
-    //update_stride_variables();
+    // Update stride scheduling variables on every tick
+    update_stride_variables();
 
-    struct proc *nextproc = 0;
-    // Update global pass each tick
-    strideglobalinfo.global_pass += strideglobalinfo.global_stride;
-    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    {
+#ifdef RR
+    // Round Robin scheduling
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
       if (p->state != RUNNABLE)
         continue;
 
-      // Select process with lowest pass value
+      // Switch to chosen process
+      c->proc = p;
+      switchuvm(p);
+      p->state = RUNNING;
+
+      swtch(&(c->scheduler), p->context);
+      switchkvm();
+
+      // Process is done running for now
+      c->proc = 0;
+    }
+#elif defined(STRIDE)
+    // Stride scheduling
+    struct proc *nextproc = 0;
+
+    // Increment the global pass to keep time in sync
+    strideglobalinfo.global_pass += strideglobalinfo.global_stride;
+    
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      if (p->state != RUNNABLE)
+        continue;
+
+      // Select the process with the lowest pass value
       if (nextproc == 0 ||
           p->pass < nextproc->pass ||
           (p->pass == nextproc->pass && p->run_ticks < nextproc->run_ticks) ||
-          (p->pass == nextproc->pass && p->run_ticks == nextproc->run_ticks && p->pid < nextproc->pid))
-      {
+          (p->pass == nextproc->pass && p->run_ticks == nextproc->run_ticks && p->pid < nextproc->pid)) {
         nextproc = p;
       }
     }
 
-    if (nextproc != 0)
-    {
+    if (nextproc != 0) {
       p = nextproc;
 
       // Switch to the chosen process
@@ -473,13 +486,14 @@ scheduler(void)
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
-      // Update pass and run_ticks for the selected process
+      // Update the pass and ticks for this process after running
       p->pass += p->stride;
-      p->run_ticks++; // Increment the total ticks for this process
-
+      p->run_ticks++;
+      
       // Process is done running for now
       c->proc = 0;
     }
+#endif
 
     release(&ptable.lock);
   }

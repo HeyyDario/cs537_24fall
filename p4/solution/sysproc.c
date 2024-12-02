@@ -20,7 +20,6 @@ extern struct {
   int global_pass;
 } strideglobalinfo;
 
-
 int
 sys_fork(void)
 {
@@ -104,35 +103,47 @@ sys_uptime(void)
   return xticks;
 }
 
-// System call to set the ticket count for the current process
 int sys_settickets(void) {
-  int n;
+  int new_tickets;
 
-  // Retrieve the argument passed to the system call
-  if (argint(0, &n) < 0) {
-    return -1; // Error if no valid argument
+  if (argint(0, &new_tickets) < 0) {
+    return -1;
   }
 
-  // Clamp n to be within the allowed range
-  if (n < 1) {
-    n = 8; // Default ticket count if n < 1
-  } else if (n > (1 << 5)) {
-    n = 1 << 5; // Max ticket count is 32
+  if (new_tickets < 1) {
+    new_tickets = 8; // Default ticket count if less than 1
+  } else if (new_tickets > (1 << 5)) {
+    new_tickets = 1 << 5; // Maximum of 32
   }
 
   struct proc *p = myproc();
+  int old_tickets = p->tickets;
+
+  if (new_tickets == old_tickets) {
+    return 0; 
+  }
 
   acquire(&ptable.lock);
 
-  // Update global tickets by removing old ticket count and adding the new count
+  // compute remain of the current stride
+  int remain = p->pass - strideglobalinfo.global_pass;
+
+  // adjust global ticket count
   strideglobalinfo.global_tickets -= p->tickets;
-  p->tickets = n;
+  p->tickets = new_tickets;
   strideglobalinfo.global_tickets += p->tickets;
 
-  // Recalculate the process's stride based on its new ticket count
+  // recalculate the process's stride based on the new ticket count
+  int old_stride = p->stride;
   p->stride = STRIDE1 / p->tickets;
 
-  // Update global stride after changing total tickets
+  // scale the remain proportionally to the new stride
+  remain = remain * p->stride / old_stride;
+
+  // Update pass based on the adjusted remain
+  p->pass = strideglobalinfo.global_pass + remain;
+
+  // recalculate global stride
   if (strideglobalinfo.global_tickets > 0) {
     strideglobalinfo.global_stride = STRIDE1 / strideglobalinfo.global_tickets;
   } else {
@@ -140,34 +151,33 @@ int sys_settickets(void) {
   }
 
   release(&ptable.lock);
-
-  return 0; // Success
+  return 0; 
 }
+
 
 int sys_getpinfo(void) {
   struct pstat *ps;
 
-  // Retrieve the pointer to the pstat structure passed from user space
   if (argptr(0, (void*)&ps, sizeof(*ps)) < 0) {
-    return -1; // Return an error if the argument pointer is invalid
+    return -1; 
   }
 
-  acquire(&ptable.lock);  // Acquire the process table lock
+  acquire(&ptable.lock);
 
   struct proc *p;
   int i;
   for (i = 0, p = ptable.proc; p < &ptable.proc[NPROC]; i++, p++) {
-    ps->inuse[i] = (p->state != UNUSED) ? 1 : 0;  // Check if the process slot is in use
+    ps->inuse[i] = (p->state != UNUSED) ? 1 : 0;  //if the process slot is in use
     ps->tickets[i] = p->tickets;
     ps->pid[i] = p->pid;
     ps->pass[i] = p->pass;
     ps->remain[i] = p->remain;
     ps->stride[i] = p->stride;
-    ps->rtime[i] = p->run_ticks; // Total running time (ticks)
+    ps->rtime[i] = p->run_ticks; // total running time by ticks
   }
 
-  release(&ptable.lock);  // Release the process table lock
-  return 0;  // Success
+  release(&ptable.lock); 
+  return 0;  
 }
 
 
