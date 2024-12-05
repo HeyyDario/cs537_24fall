@@ -14,15 +14,16 @@
 #define BLOCK_SIZE (512)
 #define ROUNDUP(num, factor) ((((num) + (factor) - 1) / (factor)) * (factor))
 
-// Define constants for RAID modes
-#define RAID0 0
-#define RAID1 1
+// // Define constants for RAID modes
+// #define RAID0 0
+// #define RAID1 1
+// #define RAID1V 2
 
 // Structure to store RAID information separately
-struct __attribute__((packed)) raid_info {
-    uint64_t raid_mode;
-    uint64_t num_disks;
-};
+// struct __attribute__((packed)) raid_info {
+//     uint64_t raid_mode;
+//     uint64_t num_disks;
+// };
 
 void parse_arguments(int argc, char *argv[], int *raid_mode, char ***disk_paths, int *num_disks, int *num_inodes, int *num_data_blocks);
 void validate_disks(int *fds, char **disk_paths, int num_disks, uint64_t required_size);
@@ -116,6 +117,27 @@ int main(int argc, char *argv[])
     sb.d_bitmap_ptr = d_bitmap_ptr;
     sb.i_blocks_ptr = i_blocks_ptr;
     sb.d_blocks_ptr = d_blocks_ptr;
+    sb.raid_mode = raid_mode;
+    sb.num_disks = (uint64_t)num_disks;
+
+    uint64_t *disk_order = malloc(num_disks * sizeof(uint64_t));
+    if (!disk_order)
+    {
+        perror("Failed to allocate memory for disk_order");
+        for (int j = 0; j < num_disks; j++)
+        {
+            close(fds[j]);
+        }
+        free(fds);
+        free(disk_paths);
+        exit(EXIT_FAILURE);
+    }
+
+    // Populate disk_order with indices
+    for (uint64_t i = 0; i < num_disks; i++)
+    {
+        disk_order[i] = i; // Example: Disk order is sequential
+    }
 
     // Store RAID information
     struct raid_info raid_info;
@@ -133,6 +155,7 @@ int main(int argc, char *argv[])
             {
                 close(fds[j]);
             }
+            free(disk_order);
             free(fds);
             free(disk_paths);
             exit(EXIT_FAILURE);
@@ -146,6 +169,7 @@ int main(int argc, char *argv[])
             {
                 close(fds[j]);
             }
+            free(disk_order);
             free(fds);
             free(disk_paths);
             exit(EXIT_FAILURE);
@@ -159,11 +183,48 @@ int main(int argc, char *argv[])
             {
                 close(fds[j]);
             }
+            free(disk_order);
+            free(fds);
+            free(disk_paths);
+            exit(EXIT_FAILURE);
+        }
+        // Write the number of disks
+        uint64_t num_disks_64 = (uint64_t)num_disks;
+        written = write(fds[i], &num_disks_64, sizeof(uint64_t));
+        //written = write(fds[i], &num_disks, sizeof(uint64_t));
+        if (written != sizeof(uint64_t))
+        {
+            fprintf(stderr, "Failed to write num_disks to disk %d\n", i);
+            perror("write");
+            // Close files
+            for (int j = 0; j < num_disks; j++)
+            {
+                close(fds[j]);
+            }
+            free(disk_order);
+            free(fds);
+            free(disk_paths);
+            exit(EXIT_FAILURE);
+        }
+        // Write the disk_order array
+        written = write(fds[i], disk_order, num_disks * sizeof(uint64_t));
+        if (written != (ssize_t)(num_disks * sizeof(uint64_t)))
+        {
+            fprintf(stderr, "Failed to write disk_order to disk %d\n", i);
+            perror("write");
+            // Close files
+            for (int j = 0; j < num_disks; j++)
+            {
+                close(fds[j]);
+            }
+            free(disk_order);
             free(fds);
             free(disk_paths);
             exit(EXIT_FAILURE);
         }
     }
+
+    free(disk_order);
 
     // Allocate zero-filled buffers for bitmaps
     char *inode_bitmap = calloc(1, inode_bitmap_size);
@@ -306,52 +367,82 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-void parse_arguments(int argc, char *argv[], int *raid_mode, char ***disk_paths, int *num_disks, int *num_inodes, int *num_data_blocks) {
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-r") == 0) {
-            if (i + 1 >= argc) {
+void parse_arguments(int argc, char *argv[], int *raid_mode, char ***disk_paths, int *num_disks, int *num_inodes, int *num_data_blocks)
+{
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-r") == 0)
+        {
+            if (i + 1 >= argc)
+            {
                 fprintf(stderr, "Option -r requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
-            char *endptr;
-            *raid_mode = strtol(argv[++i], &endptr, 10);
-            if (*endptr != '\0' || (*raid_mode != RAID0 && *raid_mode != RAID1)) {
-                fprintf(stderr, "Invalid RAID mode. Use 0 for RAID 0 or 1 for RAID 1.\n");
+            // added 1v for RAID mode parsing
+            if (strcmp(argv[++i], "0") == 0)
+            {
+                *raid_mode = RAID0;
+            }
+            else if (strcmp(argv[i], "1") == 0)
+            {
+                *raid_mode = RAID1;
+            }
+            else if (strcmp(argv[i], "1v") == 0)
+            {
+                *raid_mode = RAID1V; // support for RAID 1v
+            }
+            else
+            {
+                fprintf(stderr, "Invalid RAID mode. Use 0, 1, or 1v.\n");
                 exit(EXIT_FAILURE);
             }
-        } else if (strcmp(argv[i], "-d") == 0) {
-            if (i + 1 >= argc) {
+        }
+        else if (strcmp(argv[i], "-d") == 0)
+        {
+            if (i + 1 >= argc)
+            {
                 fprintf(stderr, "Option -d requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
             (*num_disks)++;
             *disk_paths = realloc(*disk_paths, (*num_disks) * sizeof(char *));
-            if (!*disk_paths) {
+            if (!*disk_paths)
+            {
                 perror("Memory allocation failed");
                 exit(EXIT_FAILURE);
             }
             (*disk_paths)[(*num_disks) - 1] = argv[++i];
-        } else if (strcmp(argv[i], "-i") == 0) {
-            if (i + 1 >= argc) {
+        }
+        else if (strcmp(argv[i], "-i") == 0)
+        {
+            if (i + 1 >= argc)
+            {
                 fprintf(stderr, "Option -i requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
             *num_inodes = atoi(argv[++i]);
-            if (*num_inodes <= 0) {
+            if (*num_inodes <= 0)
+            {
                 fprintf(stderr, "Invalid number of inodes.\n");
                 exit(EXIT_FAILURE);
             }
-        } else if (strcmp(argv[i], "-b") == 0) {
-            if (i + 1 >= argc) {
+        }
+        else if (strcmp(argv[i], "-b") == 0)
+        {
+            if (i + 1 >= argc)
+            {
                 fprintf(stderr, "Option -b requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
             *num_data_blocks = atoi(argv[++i]);
-            if (*num_data_blocks <= 0) {
+            if (*num_data_blocks <= 0)
+            {
                 fprintf(stderr, "Invalid number of data blocks.\n");
                 exit(EXIT_FAILURE);
             }
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "Invalid argument: %s\n", argv[i]);
             fprintf(stderr, "Usage: %s -r [0|1] -d disk1 [-d disk2 ...] -i num_inodes -b num_data_blocks\n", argv[0]);
             exit(EXIT_FAILURE);
@@ -359,33 +450,39 @@ void parse_arguments(int argc, char *argv[], int *raid_mode, char ***disk_paths,
     }
 
     // Validate required arguments
-    if (*raid_mode == -1) {
+    if (*raid_mode == -1)
+    {
         fprintf(stderr, "RAID mode not specified. Use -r [0|1].\n");
         exit(EXIT_FAILURE);
     }
 
-    if (*num_disks == 0) {
+    if (*num_disks == 0)
+    {
         fprintf(stderr, "No disks specified. Use -d disk1 [-d disk2 ...].\n");
         exit(EXIT_FAILURE);
     }
 
-    if (*raid_mode == RAID1 && *num_disks < 2) {
-        fprintf(stderr, "RAID 1 requires at least two disks.\n");
+    if ((*raid_mode == RAID1 || *raid_mode == RAID1V) && *num_disks < 2)
+    {
+        fprintf(stderr, "RAID 1 and RAID 1v require at least two disks.\n");
         exit(EXIT_FAILURE);
     }
 
-    if (*num_inodes == -1) {
+    if (*num_inodes == -1)
+    {
         fprintf(stderr, "Number of inodes not specified. Use -i num_inodes.\n");
         exit(EXIT_FAILURE);
     }
 
-    if (*num_data_blocks == -1) {
+    if (*num_data_blocks == -1)
+    {
         fprintf(stderr, "Number of data blocks not specified. Use -b num_data_blocks.\n");
         exit(EXIT_FAILURE);
     }
 }
 
-void validate_disks(int *fds, char **disk_paths, int num_disks, uint64_t required_size) {
+void validate_disks(int *fds, char **disk_paths, int num_disks, uint64_t required_size)
+{
     for (int i = 0; i < num_disks; i++)
     {
         struct stat st;
@@ -403,8 +500,8 @@ void validate_disks(int *fds, char **disk_paths, int num_disks, uint64_t require
         }
         if ((uint64_t)st.st_size < required_size)
         {
-            //fprintf(stderr, "Disk image %s is too small.\n", disk_paths[i]);
-            // Close files
+            // fprintf(stderr, "Disk image %s is too small.\n", disk_paths[i]);
+            //  Close files
             for (int j = 0; j <= i; j++)
             {
                 close(fds[j]);

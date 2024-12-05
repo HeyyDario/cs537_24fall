@@ -1,3 +1,5 @@
+#define FUSE_USE_VERSION 26 
+
 #include <sys/types.h>
 #include "wfs.h"
 #include <fuse.h>
@@ -10,8 +12,9 @@
 #include <stdbool.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <time.h> 
-#define FUSE_USE_VERSION 26  
+#include <time.h>  
+#include <inttypes.h>
+
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 
@@ -47,6 +50,7 @@ struct wfs_inode *inodes;
 char *inode_bitmap;
 char *data_bitmap;
 char *data_blocks; // Pointer to the data blocks section
+struct raid_info raid;
 
 // Function prototypes
 struct wfs_inode *find_inode_by_path(const char *path);
@@ -99,6 +103,22 @@ int main(int argc, char *argv[])
     data_bitmap = (char *)mapped_memory + sb.d_bitmap_ptr;
     inodes = (struct wfs_inode *)((char *)mapped_memory + sb.i_blocks_ptr);
     data_blocks = (char *)mapped_memory + sb.d_blocks_ptr; // Initialize pointer to data blocks
+
+    // Read RAID info after the superblock
+    if (pread(global_fd, &raid, sizeof(struct raid_info), sizeof(struct wfs_sb)) != sizeof(struct raid_info))
+    {
+        perror("Failed to read RAID information");
+        exit(EXIT_FAILURE);
+    }
+
+    // Ensure RAID mode is valid
+    if ((raid.raid_mode == RAID0 && raid.num_disks < 1) ||
+        ((raid.raid_mode == RAID1 || raid.raid_mode == RAID1V) && raid.num_disks < 2))
+    {
+        fprintf(stderr, "Invalid RAID configuration: RAID Mode %" PRIu64 ", Number of Disks %" PRIu64 "\n",
+                raid.raid_mode, raid.num_disks);
+        exit(EXIT_FAILURE);
+    }
 
     // Mark root inode as used
     inode_bitmap[0] |= 0x01;
@@ -273,16 +293,13 @@ static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_
     return 0;
 }
 
-static int wfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
-{
+static int wfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
     struct wfs_inode *inode = find_inode_by_path(path);
-    if (!inode)
-    {
+    if (!inode) {
         return -ENOENT;
     }
 
-    if (offset >= inode->size)
-    {
+    if (offset >= inode->size) {
         return 0; // Nothing to read
     }
 
@@ -291,31 +308,60 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset, stru
     size_t block_index = offset / BLOCK_SIZE;
     size_t block_offset = offset % BLOCK_SIZE;
 
-    while (bytes_read < bytes_to_read)
-    {
-        off_t current_block_ptr;
-        if (block_index < D_BLOCK)
-        {
-            current_block_ptr = inode->blocks[block_index];
-        }
-        else
-        {
-            if (inode->blocks[IND_BLOCK] == 0)
-            {
-                return -EIO; // Indirect block not initialized
+    while (bytes_read < bytes_to_read) {
+        // RAID 1v: Read all copies
+        off_t current_block_ptrs[raid.num_disks];
+        char block_data[raid.num_disks][BLOCK_SIZE];
+        int valid_copies = 0;
+
+        // Fetch the block pointers
+        for (int disk = 0; disk < raid.num_disks; disk++) {
+            if (block_index < D_BLOCK) {
+                current_block_ptrs[disk] = inode->blocks[block_index];
+            } else if (inode->blocks[IND_BLOCK] != 0) {
+                off_t *indirect_blocks = (off_t *)((char *)mapped_memory + inode->blocks[IND_BLOCK]);
+                current_block_ptrs[disk] = indirect_blocks[block_index - D_BLOCK];
+            } else {
+                current_block_ptrs[disk] = 0; // Block not initialized
             }
-            off_t *indirect_blocks = (off_t *)((char *)mapped_memory + inode->blocks[IND_BLOCK]);
-            current_block_ptr = indirect_blocks[block_index - D_BLOCK];
+
+            if (current_block_ptrs[disk] != 0) {
+                char *disk_block_data = (char *)mapped_memory + current_block_ptrs[disk];
+                memcpy(block_data[disk], disk_block_data, BLOCK_SIZE);
+                valid_copies++;
+            }
         }
 
-        if (current_block_ptr == 0)
-        {
-            break; // No more data
+        // Verify and decide the majority block for RAID 1v
+        int majority_index = 0; // Default to disk 0 if tie
+        if (raid.raid_mode == RAID1V) {
+            // Initialize match_count to zero
+            int match_count[raid.num_disks];
+            memset(match_count, 0, sizeof(match_count));
+
+            for (int i = 0; i < valid_copies; i++) {
+                for (int j = 0; j < valid_copies; j++) {
+                    if (memcmp(block_data[i], block_data[j], BLOCK_SIZE) == 0) {
+                        match_count[i]++;
+                    }
+                }
+            }
+
+            // Find the majority block or tie-break using index
+            int max_matches = 0;
+            for (int i = 0; i < valid_copies; i++) {
+                if (match_count[i] > max_matches) {
+                    max_matches = match_count[i];
+                    majority_index = i;
+                } else if (match_count[i] == max_matches && i < majority_index) {
+                    majority_index = i;
+                }
+            }
         }
 
-        char *block_data = (char *)mapped_memory + current_block_ptr;
+        // Copy data from the selected block
         size_t bytes_from_block = min(BLOCK_SIZE - block_offset, bytes_to_read - bytes_read);
-        memcpy(buf + bytes_read, block_data + block_offset, bytes_from_block);
+        memcpy(buf + bytes_read, block_data[majority_index] + block_offset, bytes_from_block);
 
         bytes_read += bytes_from_block;
         block_index++;
@@ -324,6 +370,8 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset, stru
 
     return bytes_read;
 }
+
+
 
 int allocate_block()
 {
@@ -410,34 +458,33 @@ static int wfs_write(const char *path, const char *buf, size_t size, off_t offse
         size_t block_offset = (offset + bytes_written) % BLOCK_SIZE;
         size_t bytes_to_write = min(BLOCK_SIZE - block_offset, size - bytes_written);
 
-        if (block_index < D_BLOCK)
-        {
-            if (inode->blocks[block_index] == 0)
-            {
-                inode->blocks[block_index] = allocate_block();
-                if (inode->blocks[block_index] == -1)
-                    return -ENOSPC;
+        for (int disk = 0; disk < raid.num_disks; disk++) {
+            if (block_index < D_BLOCK) {
+                if (inode->blocks[block_index] == 0) {
+                    inode->blocks[block_index] = allocate_block();
+                    if (inode->blocks[block_index] == -1) {
+                        return -ENOSPC;
+                    }
+                }
+                char *block_data = (char *)mapped_memory + inode->blocks[block_index];
+                memcpy(block_data + block_offset, buf + bytes_written, bytes_to_write);
+            } else {
+                if (inode->blocks[IND_BLOCK] == 0) {
+                    if (initialize_indirect_block(inode) != 0) {
+                        return -ENOSPC;
+                    }
+                }
+                off_t *indirect_blocks = (off_t *)((char *)mapped_memory + inode->blocks[IND_BLOCK]);
+                int indirect_index = block_index - D_BLOCK;
+                if (indirect_blocks[indirect_index] == 0) {
+                    indirect_blocks[indirect_index] = allocate_block();
+                    if (indirect_blocks[indirect_index] == -1) {
+                        return -ENOSPC;
+                    }
+                }
+                char *block_data = (char *)mapped_memory + indirect_blocks[indirect_index];
+                memcpy(block_data + block_offset, buf + bytes_written, bytes_to_write);
             }
-            char *block_data = (char *)mapped_memory + inode->blocks[block_index];
-            memcpy(block_data + block_offset, buf + bytes_written, bytes_to_write);
-        }
-        else
-        {
-            if (inode->blocks[IND_BLOCK] == 0)
-            {
-                if (initialize_indirect_block(inode) != 0)
-                    return -ENOSPC;
-            }
-            off_t *indirect_blocks = (off_t *)((char *)mapped_memory + inode->blocks[IND_BLOCK]);
-            int indirect_index = block_index - D_BLOCK;
-            if (indirect_blocks[indirect_index] == 0)
-            {
-                indirect_blocks[indirect_index] = allocate_block();
-                if (indirect_blocks[indirect_index] == -1)
-                    return -ENOSPC;
-            }
-            char *block_data = (char *)mapped_memory + indirect_blocks[indirect_index];
-            memcpy(block_data + block_offset, buf + bytes_written, bytes_to_write);
         }
         bytes_written += bytes_to_write;
     }

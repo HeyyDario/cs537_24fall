@@ -1,5 +1,6 @@
 #include <time.h>
 #include <sys/stat.h>
+#include <stdint.h>
 
 #define BLOCK_SIZE (512)
 #define MAX_NAME   (28)
@@ -7,6 +8,12 @@
 #define D_BLOCK    (6)
 #define IND_BLOCK  (D_BLOCK+1)
 #define N_BLOCKS   (IND_BLOCK+1)
+
+// Define constants for RAID modes
+#define RAID0 0
+#define RAID1 1
+#define RAID1V 2
+
 
 /*
   The fields in the superblock should reflect the structure of the filesystem.
@@ -32,6 +39,9 @@ struct wfs_sb {
     off_t i_blocks_ptr;
     off_t d_blocks_ptr;
     // Extend after this line
+    int raid_mode;
+    uint64_t *disk_order;      
+    uint64_t num_disks;        
 };
 
 // Inode
@@ -54,4 +64,9 @@ struct wfs_inode {
 struct wfs_dentry {
     char name[MAX_NAME];
     int num;
+};
+
+struct __attribute__((packed)) raid_info {
+    uint64_t raid_mode;
+    uint64_t num_disks;
 };
