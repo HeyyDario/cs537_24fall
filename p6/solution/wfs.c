@@ -61,11 +61,21 @@ static int remove_directory_entry(struct wfs_inode *parent_inode, int inode_num,
 static void free_block(int block_num);
 static void free_inode(int inode_num);
 
-int main(int argc, char *argv[])
-{
-    if (argc < 3)
-    {
-        fprintf(stderr, "Usage: %s <disk_path> [FUSE options] <mount_point>\n", argv[0]);
+int main(int argc, char *argv[]) {
+    printf("STARTING main() in wfs.c.\n");
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <disk_path>... [FUSE options] <mount_point>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 1: Identify the number of disk images
+    int num_disks = 0;
+    while (num_disks < argc - 1 && argv[num_disks + 1][0] != '-') {
+        num_disks++;
+    }
+
+    if (num_disks == 0) {
+        fprintf(stderr, "Error: No disk images specified.\n");
         exit(EXIT_FAILURE);
     }
 
@@ -78,67 +88,117 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    // Get file status to determine file size
+    printf("Debug: number of disks is: %d.\n", num_disks);
+
+    // Step 2: Open and validate all disk images
+    int fds[num_disks];
+    //struct raid_info raid;
+    struct wfs_sb superblocks[num_disks];
+
+    for (int i = 0; i < num_disks; i++) {
+        fds[i] = open(argv[i + 1], O_RDWR);
+        if (fds[i] == -1) {
+            perror("Failed to open disk image");
+            exit(EXIT_FAILURE);
+        }
+
+        // Read and validate superblock
+        if (pread(fds[i], &superblocks[i], sizeof(struct wfs_sb), 0) != sizeof(struct wfs_sb)) {
+            perror("Failed to read superblock");
+            exit(EXIT_FAILURE);
+        }
+
+        // Read RAID info
+        if (pread(fds[i], &raid, sizeof(struct raid_info), sizeof(struct wfs_sb)) != sizeof(struct raid_info)) {
+            perror("Failed to read RAID information");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Step 3: Ensure all superblocks are consistent
+    for (int i = 1; i < num_disks; i++) {
+        if (memcmp(&superblocks[0], &superblocks[i], sizeof(struct wfs_sb)) != 0) {
+            fprintf(stderr, "Error: Inconsistent superblocks across disks.\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Step 4: Validate RAID configuration
+    if (num_disks != raid.num_disks) {
+        fprintf(stderr, "Error: Incorrect number of disks. Expected %" PRIu64 ", got %d.\n",
+                raid.num_disks, num_disks);
+        exit(EXIT_FAILURE);
+    }
+
+    // Step 5: Map the first disk image into memory
     struct stat file_stat;
-    if (fstat(global_fd, &file_stat) == -1)
-    {
+    if (fstat(fds[0], &file_stat) == -1) {
         perror("fstat");
         exit(EXIT_FAILURE);
     }
 
-    // Map the entire file into memory
-    mapped_memory = mmap(NULL, file_stat.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, global_fd, 0);
-    if (mapped_memory == MAP_FAILED)
-    {
+    mapped_memory = mmap(NULL, file_stat.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fds[0], 0);
+    if (mapped_memory == MAP_FAILED) {
         perror("mmap");
         exit(EXIT_FAILURE);
     }
 
-    // Close the file descriptor
-    close(global_fd);
-
     // Set superblock pointer
-    memcpy(&sb, mapped_memory, sizeof(struct wfs_sb));  // Use memcpy for safety
+    memcpy(&sb, mapped_memory, sizeof(struct wfs_sb));
     inode_bitmap = (char *)mapped_memory + sb.i_bitmap_ptr;
     data_bitmap = (char *)mapped_memory + sb.d_bitmap_ptr;
     inodes = (struct wfs_inode *)((char *)mapped_memory + sb.i_blocks_ptr);
-    data_blocks = (char *)mapped_memory + sb.d_blocks_ptr; // Initialize pointer to data blocks
-
-    // Read RAID info after the superblock
-    if (pread(global_fd, &raid, sizeof(struct raid_info), sizeof(struct wfs_sb)) != sizeof(struct raid_info))
-    {
-        perror("Failed to read RAID information");
-        exit(EXIT_FAILURE);
-    }
-
-    // Ensure RAID mode is valid
-    if ((raid.raid_mode == RAID0 && raid.num_disks < 1) ||
-        ((raid.raid_mode == RAID1 || raid.raid_mode == RAID1V) && raid.num_disks < 2))
-    {
-        fprintf(stderr, "Invalid RAID configuration: RAID Mode %" PRIu64 ", Number of Disks %" PRIu64 "\n",
-                raid.raid_mode, raid.num_disks);
-        exit(EXIT_FAILURE);
-    }
+    data_blocks = (char *)mapped_memory + sb.d_blocks_ptr;
 
     // Mark root inode as used
     inode_bitmap[0] |= 0x01;
 
-    // Pass the modified argv and argc to fuse_main
-    argv++;
-    argc--;
+    // Step 6: Filter out disk images from argv and prepare FUSE arguments
+    char **fuse_argv = malloc((argc - num_disks) * sizeof(char *));
+    if (!fuse_argv) {
+        perror("Failed to allocate memory for FUSE arguments");
+        exit(EXIT_FAILURE);
+    }
 
-    // Call fuse_main with modified arguments
-    int fuse_ret = fuse_main(argc, argv, &wfs_oper, NULL);
+    fuse_argv[0] = argv[0]; // Preserve the program name
+    
+    for (int i = num_disks + 1; i < argc; i++) {
+        fuse_argv[i - num_disks] = argv[i];
+    }
+    int fuse_argc = argc - num_disks;
 
-    // Unmap the memory
-    if (munmap(mapped_memory, file_stat.st_size) == -1)
-    {
+    // Debugging: Print FUSE arguments
+    printf("FUSE arguments:\n");
+    for (int i = 0; i < fuse_argc; i++) {
+        printf("fuse_argv[%d] = %s\n", i, fuse_argv[i]);
+    }
+    printf("Number of args passed into fuse_main: %d. \n", fuse_argc);
+
+    // Step 7: Call FUSE
+    printf("Start to init FUSE: \n");
+    int fuse_ret = fuse_main(fuse_argc, fuse_argv, &wfs_oper, NULL);
+    printf("Middle.\n");
+    if (fuse_ret != 0) {
+        printf("FUSE mount failed with return code %d\n", fuse_ret);
+    }
+    printf("End init FUSE: \n");
+
+
+    // Step 8: Cleanup
+    if (munmap(mapped_memory, file_stat.st_size) == -1) {
         perror("munmap");
         exit(EXIT_FAILURE);
     }
 
+    for (int i = 0; i < num_disks; i++) {
+        close(fds[i]);
+    }
+
+    free(fuse_argv);
+
     return fuse_ret;
 }
+
 
 struct wfs_inode *find_inode_by_path(const char *path)
 {
@@ -623,8 +683,13 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t dev)
     return 0;
 }
 
+// Allocate an inode for the directory
+// Set up . and .. entries in the new directory
+// Update the parent directory with an entry for the new directory
 static int wfs_mkdir(const char *path, mode_t mode)
 {
+    printf("START MKDIR: Attempting to create directory %s with mode %o\n", path, mode);
+    // Check if directory already exists
     if (find_inode_by_path(path))
         return -EEXIST;
 
@@ -651,6 +716,8 @@ static int wfs_mkdir(const char *path, mode_t mode)
         *base_name = '\0';
     }
     base_name++;
+
+    printf("Parent path: %s, New directory name: %s\n", parent_path, base_name);
 
     struct wfs_inode *parent_inode = find_inode_by_path(parent_path);
     free(parent_path);
@@ -704,6 +771,7 @@ static int wfs_mkdir(const char *path, mode_t mode)
     }
 
     parent_inode->nlinks++; // Increment link count
+    printf("END MKDIR.\n");
 
     return 0;
 }
