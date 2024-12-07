@@ -1,467 +1,356 @@
 #include <stdint.h>
-#include <sys/types.h>
-#include "wfs.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <string.h>
 #include <time.h>
-#include <sys/stat.h>
-#include <errno.h>
-#include <inttypes.h>
+#include "wfs.h"
 
 #define BLOCK_SIZE (512)
+#define MAX_DISKS 10
 #define ROUNDUP(num, factor) ((((num) + (factor) - 1) / (factor)) * (factor))
 
-// Function prototypes
-void parse_arguments(int argc, char *argv[], int *raid_mode, char ***disk_paths, int *num_disks, int *num_inodes, int *num_data_blocks);
-void calculate_sizes_and_offsets(int *num_inodes, int num_data_blocks, uint64_t *inode_bitmap_size, uint64_t *data_bitmap_size, uint64_t *i_bitmap_ptr, uint64_t *d_bitmap_ptr, uint64_t *i_blocks_ptr, uint64_t *d_blocks_ptr);
-int *open_disk_files(char **disk_paths, int num_disks);
-void validate_disks(int *fds, char **disk_paths, int num_disks, uint64_t required_size);
-void initialize_superblock_and_raid_info(struct wfs_sb *sb, struct raid_info *raid_info, int raid_mode, int num_disks, int num_inodes, int num_data_blocks, uint64_t i_bitmap_ptr, uint64_t d_bitmap_ptr, uint64_t i_blocks_ptr, uint64_t d_blocks_ptr);
-void write_superblock_and_raid_info(int *fds, int num_disks, struct wfs_sb *sb, struct raid_info *raid_info);
-void initialize_bitmaps(int *fds, int num_disks, uint64_t i_bitmap_ptr, uint64_t d_bitmap_ptr, uint64_t inode_bitmap_size, uint64_t data_bitmap_size);
-void initialize_root_inode(struct wfs_inode *root_inode);
-void update_inode_bitmap(int *fds, int num_disks, uint64_t i_bitmap_ptr, uint64_t inode_bitmap_size);
-void write_root_inode(int *fds, int num_disks, uint64_t i_blocks_ptr, struct wfs_inode *root_inode);
-void cleanup(int *fds, int num_disks, char **disk_paths);
+void parse_arguments(int argc, char *argv[], int *raid_mode, char *diskimg[], int *num_disks, int *num_inodes, int *num_data_blocks);
+int initialize_disk(char *paths, int inodes, int blocks, int raid, int f_id, int disk_id);
+int open_disk_image(char *paths);
+int validate_disk_image(int fd, struct stat *st);
+int initialize_superblock(struct wfs_sb *sb, int inodes, int blocks, size_t size, int f_id, int raid, int disk_id);
+int write_superblock(int fd, struct wfs_sb *sb);
+void initialize_root_inode(struct wfs_inode *inode);
+int initialize_inode_bitmap(int fd, off_t bitmap_ptr);
+int write_root_inode(int fd, off_t inode_ptr, struct wfs_inode *inode);
 
-int main(int argc, char *argv[]) {
-    char **disk_paths = NULL;
-    int num_disks = 0;
-    int raid_mode = -1;
-    int num_inodes = -1;
-    int num_data_blocks = -1;
+/**
+ * This function creates a RAID-based filesystem by:
+ * 1. Parsing command-line arguments to determine the RAID mode, disk paths, number of inodes, and data blocks.
+ *    Example usage:
+ *      Command: ./mkfs -r 1 -d disk1 -d disk2 -i 32 -b 200
+ *      Parsed output:
+ *        RAID Mode: RAID1
+ *        Disks: [disk1, disk2]
+ *        Number of Inodes: 32
+ *        Number of Data Blocks: 224
+ * 2. Generating a unique filesystem ID based on the current time.
+ * 3. Initializing each disk in the file system with the help of `initialize_disk`.
+ *    Inside `initialize_disk`:
+ *      a. [X]Open the disk image file for writing.
+ *      b. [X]Validate the disk image file's size.
+ *      c. [X]Initialize the superblock with metadata for inodes, blocks, RAID mode, etc.
+ *      d. [X]Write the superblock to the disk.
+ *      e. [X]Initialize the root inode (e.g., root directory metadata).
+ *      f. [X]Set up the inode bitmap to track allocated inodes.
+ *      g. [X]Write the root inode to the disk.
+ *      h. [X]Close the disk image file.
+ *
+ */
+int main(int argc, char *argv[])
+{
+    int raid_mode = -1;                // RAID mode
+    char *disk_paths[MAX_DISKS] = {0}; // disk paths
+    int num_disks = 0;                 // number of disks
+    int num_inodes = -1;               // number of inodes
+    int num_data_blocks = -1;          // number of data blocks
 
-    // Step 1: Parse command-line arguments
-    parse_arguments(argc, argv, &raid_mode, &disk_paths, &num_disks, &num_inodes, &num_data_blocks);
+    // parse command-line arguments
+    parse_arguments(argc, argv, &raid_mode, disk_paths, &num_disks, &num_inodes, &num_data_blocks);
+    // Debugging: Print parsed arguments
+    // printf("Debugging: Parsed Arguments:\n");
+    // printf("  RAID Mode: %d\n", raid_mode);
+    // printf("  Number of Disks: %d\n", num_disks);
+    // for (int i = 0; i < num_disks; i++) {
+    //     printf("    Disk %d: %s\n", i + 1, disk_paths[i]);
+    // }
+    // printf("  Number of Inodes: %d\n", num_inodes);
+    // printf("  Number of Data Blocks: %d\n", num_data_blocks);
 
-    // Step 2: Round up inodes and data blocks to nearest multiple of 32
-    uint64_t inode_bitmap_size = 0;
-    uint64_t data_bitmap_size = 0;
+    // base on current time
+    int f_id = (int)time(NULL);
 
-    // Round up to the nearest multiple of 32
-    num_inodes = ROUNDUP(num_inodes, 32);
-    num_data_blocks = ROUNDUP(num_data_blocks, 32);
-
-    // Step 3: Calculate sizes and offsets
-    // Calculate bitmap sizes (in bytes)
-    inode_bitmap_size = (num_inodes + 7) / 8;
-    data_bitmap_size = (num_data_blocks + 7) / 8;
-
-    // Calculate offsets
-    uint64_t sb_size = sizeof(struct wfs_sb);
-    uint64_t raid_info_size = sizeof(struct raid_info);
-    uint64_t metadata_size = sb_size + raid_info_size;
-
-    uint64_t i_bitmap_ptr = metadata_size;
-    uint64_t d_bitmap_ptr = i_bitmap_ptr + inode_bitmap_size;
-
-    // Ensure i_blocks_ptr is block-aligned
-    uint64_t i_blocks_ptr = ROUNDUP(d_bitmap_ptr + data_bitmap_size, BLOCK_SIZE);
-    uint64_t i_blocks_size = num_inodes * BLOCK_SIZE; // Each inode occupies 512 bytes
-
-    // Ensure d_blocks_ptr is block-aligned
-    uint64_t d_blocks_ptr = ROUNDUP(i_blocks_ptr + i_blocks_size, BLOCK_SIZE);
-    uint64_t d_blocks_size = num_data_blocks * BLOCK_SIZE;
-
-    // Step 4: Open disk files
-    int *fds = malloc(num_disks * sizeof(int));
-    if (!fds)
-    {
-        perror("Memory allocation failed");
-        free(disk_paths);
-        exit(EXIT_FAILURE);
-    }
-
+    // initialize each disk in the fs
     for (int i = 0; i < num_disks; i++)
     {
-        fds[i] = open(disk_paths[i], O_RDWR | O_CREAT, 0644);
-        if (fds[i] == -1)
+        // printf("initializing disk %d: %s\n", i + 1, disk_paths[i]);
+        if (initialize_disk(disk_paths[i], num_inodes, num_data_blocks, raid_mode, f_id, i) != 0)
         {
-            perror("Failed to open disk image");
-            // Close previously opened files
-            for (int j = 0; j < i; j++)
-            {
-                close(fds[j]);
-            }
-            free(fds);
-            free(disk_paths);
-            exit(EXIT_FAILURE);
+            fprintf(stderr, "Error: Failed to initialize disk %s\n", disk_paths[i]);
+            return -1;
         }
+        // printf("disk %d: %s initialized successfully.\n", i + 1, disk_paths[i]);
     }
 
-    // Step 5: Validate disk sizes
-    uint64_t required_size;
-    if (raid_mode == RAID0)
-    {
-        // In RAID 0, data is striped across disks
-        required_size = d_blocks_ptr + ((d_blocks_size + num_disks - 1) / num_disks);
-    }
-    else // RAID1
-    {
-        // In RAID 1, data is mirrored on each disk
-        required_size = d_blocks_ptr + d_blocks_size;
-    }
-
-    validate_disks(fds, disk_paths, num_disks, required_size);
-
-    // Step 5: Initialize superblock and RAID info
-    struct wfs_sb sb;
-    struct raid_info raid_info;
-    initialize_superblock_and_raid_info(&sb, &raid_info, raid_mode, num_disks, num_inodes, num_data_blocks, i_bitmap_ptr, d_bitmap_ptr, i_blocks_ptr, d_blocks_ptr);
-
-    // Step 6: Write superblock and RAID info
-    write_superblock_and_raid_info(fds, num_disks, &sb, &raid_info);
-
-    // Step 7: Initialize bitmaps
-    initialize_bitmaps(fds, num_disks, i_bitmap_ptr, d_bitmap_ptr, inode_bitmap_size, data_bitmap_size);
-
-    // Step 8: Initialize root inode
-    struct wfs_inode root_inode;
-    initialize_root_inode(&root_inode);
-
-    // Step 9: Update inode bitmap
-    update_inode_bitmap(fds, num_disks, i_bitmap_ptr, inode_bitmap_size);
-
-    // Step 10: Write root inode
-    write_root_inode(fds, num_disks, i_blocks_ptr, &root_inode);
-
-    // Step 11: Cleanup
-    cleanup(fds, num_disks, disk_paths);
-
-    printf("Filesystem successfully created.\n");
+    printf("File system created successfully with ID: %d\n", f_id);
     return 0;
 }
 
-void parse_arguments(int argc, char *argv[], int *raid_mode, char ***disk_paths, int *num_disks, int *num_inodes, int *num_data_blocks) {
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-r") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "Option -r requires an argument.\n");
+void parse_arguments(int argc, char *argv[], int *raid_mode, char *diskimg[], int *num_disks, int *num_inodes, int *num_data_blocks)
+{
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "-r") == 0)
+        {
+            // parse RAID mode
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "Error: Option -r requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
-            if (strcmp(argv[++i], "0") == 0) {
+            if (strcmp(argv[++i], "0") == 0)
+            {
                 *raid_mode = RAID0;
-            } else if (strcmp(argv[i], "1") == 0) {
+            }
+            else if (strcmp(argv[i], "1") == 0)
+            {
                 *raid_mode = RAID1;
-            } else if (strcmp(argv[i], "1v") == 0) {
-                *raid_mode = RAID1V; // support for RAID 1v
-            } else {
-                fprintf(stderr, "Invalid RAID mode. Use 0, 1, or 1v.\n");
+            }
+            else if (strcmp(argv[i], "1v") == 0)
+            {
+                *raid_mode = RAID1V;
+            }
+            else
+            {
+                fprintf(stderr, "Error: Invalid RAID mode. Use 0, 1, or 1v.\n");
                 exit(EXIT_FAILURE);
             }
-        } else if (strcmp(argv[i], "-d") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "Option -d requires an argument.\n");
+        }
+        else if (strcmp(argv[i], "-d") == 0)
+        {
+            // parse disk paths
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "Error: Option -d requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
-            (*num_disks)++;
-            *disk_paths = realloc(*disk_paths, (*num_disks) * sizeof(char *));
-            if (!*disk_paths) {
-                perror("Memory allocation failed");
+            if (*num_disks >= MAX_DISKS)
+            {
+                fprintf(stderr, "Error: Too many disks specified. Max is %d.\n", MAX_DISKS);
                 exit(EXIT_FAILURE);
             }
-            (*disk_paths)[(*num_disks) - 1] = argv[++i];
-        } else if (strcmp(argv[i], "-i") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "Option -i requires an argument.\n");
+            diskimg[(*num_disks)++] = argv[++i];
+        }
+        else if (strcmp(argv[i], "-i") == 0)
+        {
+            // parse number of inodes
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "Error: Option -i requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
             *num_inodes = atoi(argv[++i]);
-            if (*num_inodes <= 0) {
-                fprintf(stderr, "Invalid number of inodes.\n");
+            if (*num_inodes <= 0)
+            {
+                fprintf(stderr, "Error: Invalid number of inodes.\n");
                 exit(EXIT_FAILURE);
             }
-        } else if (strcmp(argv[i], "-b") == 0) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "Option -b requires an argument.\n");
+        }
+        else if (strcmp(argv[i], "-b") == 0)
+        {
+            // parse number of data blocks
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "Error: Option -b requires an argument.\n");
                 exit(EXIT_FAILURE);
             }
             *num_data_blocks = atoi(argv[++i]);
-            if (*num_data_blocks <= 0) {
-                fprintf(stderr, "Invalid number of data blocks.\n");
+            if (*num_data_blocks <= 0)
+            {
+                fprintf(stderr, "Error: Invalid number of data blocks.\n");
                 exit(EXIT_FAILURE);
             }
-        } else {
-            fprintf(stderr, "Invalid argument: %s\n", argv[i]);
+        }
+        else
+        {
+            fprintf(stderr, "Error: Invalid argument: %s\n", argv[i]);
             fprintf(stderr, "Usage: %s -r [0|1|1v] -d disk1 [-d disk2 ...] -i num_inodes -b num_data_blocks\n", argv[0]);
             exit(EXIT_FAILURE);
         }
     }
 
-    // Validate required arguments
-    if (*raid_mode == -1) {
-        fprintf(stderr, "RAID mode not specified. Use -r [0|1|1v].\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (*num_disks == 0) {
-        fprintf(stderr, "No disks specified. Use -d disk1 [-d disk2 ...].\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if ((*raid_mode == RAID1 || *raid_mode == RAID1V) && *num_disks < 2) {
-        fprintf(stderr, "RAID 1 and RAID 1v require at least two disks.\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (*num_inodes == -1) {
-        fprintf(stderr, "Number of inodes not specified. Use -i num_inodes.\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (*num_data_blocks == -1) {
-        fprintf(stderr, "Number of data blocks not specified. Use -b num_data_blocks.\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // printf("Debug: Parsed arguments - num_inodes=%d, num_data_blocks=%d, raid_mode=%d, num_disks=%d\n",
-    //        *num_inodes, *num_data_blocks, *raid_mode, *num_disks);
-}
-
-void calculate_sizes_and_offsets(int *num_inodes, int num_data_blocks, uint64_t *inode_bitmap_size, uint64_t *data_bitmap_size, uint64_t *i_bitmap_ptr, uint64_t *d_bitmap_ptr, uint64_t *i_blocks_ptr, uint64_t *d_blocks_ptr) {
-    // Round up to the nearest multiple of 32
-    *num_inodes = ROUNDUP(*num_inodes, 32);
-    num_data_blocks = ROUNDUP(num_data_blocks, 32);
-
-    // Calculate bitmap sizes (in bytes)
-    *inode_bitmap_size = (*num_inodes + 7) / 8;
-    *data_bitmap_size = (num_data_blocks + 7) / 8;
-
-    // Calculate offsets
-    uint64_t sb_size = sizeof(struct wfs_sb);
-    uint64_t raid_info_size = sizeof(struct raid_info);
-    uint64_t metadata_size = sb_size + raid_info_size;
-
-    *i_bitmap_ptr = metadata_size;
-    *d_bitmap_ptr = *i_bitmap_ptr + *inode_bitmap_size;
-
-    // Ensure i_blocks_ptr is block-aligned
-    *i_blocks_ptr = ROUNDUP(*d_bitmap_ptr + *data_bitmap_size, BLOCK_SIZE);
-    uint64_t i_blocks_size = (*num_inodes) * BLOCK_SIZE;
-
-    // Ensure d_blocks_ptr is block-aligned
-    *d_blocks_ptr = *i_blocks_ptr + i_blocks_size; // Avoid extra ROUNDUP here
-
-    // printf("Debug: Calculated sizes and offsets:\n");
-    // printf("  num_inodes=%d, num_data_blocks=%d\n", *num_inodes, num_data_blocks);
-    // printf("  inode_bitmap_size=%lu, data_bitmap_size=%lu\n", *inode_bitmap_size, *data_bitmap_size);
-    // printf("  i_bitmap_ptr=%lu, d_bitmap_ptr=%lu\n", *i_bitmap_ptr, *d_bitmap_ptr);
-    // printf("  i_blocks_ptr=%lu, d_blocks_ptr=%lu\n", *i_blocks_ptr, *d_blocks_ptr);
-}
-
-int *open_disk_files(char **disk_paths, int num_disks) {
-    int *fds = malloc(num_disks * sizeof(int));
-    if (!fds) {
-        perror("Memory allocation failed");
-        free(disk_paths);
-        exit(EXIT_FAILURE);
-    }
-
-    for (int i = 0; i < num_disks; i++) {
-        fds[i] = open(disk_paths[i], O_RDWR | O_CREAT, 0644);
-        if (fds[i] == -1) {
-            perror("Failed to open disk image");
-            // Close previously opened files
-            for (int j = 0; j < i; j++) {
-                close(fds[j]);
-            }
-            free(fds);
-            free(disk_paths);
-            exit(EXIT_FAILURE);
-        }
-    }
-    return fds;
-}
-
-void validate_disks(int *fds, char **disk_paths, int num_disks, uint64_t required_size)
-{
-    for (int i = 0; i < num_disks; i++)
+    // validate required arguments
+    if (*raid_mode == -1)
     {
-        struct stat st;
-        if (fstat(fds[i], &st) == -1)
-        {
-            perror("Failed to get disk image size");
-            // Close files
-            for (int j = 0; j <= i; j++)
-            {
-                close(fds[j]);
-            }
-            free(fds);
-            free(disk_paths);
-            exit(EXIT_FAILURE);
-        }
-
-        // printf("Debug: Disk %s size=%lu, required_size=%lu\n", disk_paths[i], (uint64_t)st.st_size, required_size);
-        
-        if ((uint64_t)st.st_size < required_size)
-        {
-            // fprintf(stderr, "Disk image %s is too small.\n", disk_paths[i]);
-            //  Close files
-            for (int j = 0; j <= i; j++)
-            {
-                close(fds[j]);
-            }
-            free(fds);
-            free(disk_paths);
-            exit(-1); // Exit with return code -1
-        }
-    }
-}
-
-void initialize_superblock_and_raid_info(struct wfs_sb *sb, struct raid_info *raid_info, int raid_mode, int num_disks, int num_inodes, int num_data_blocks, uint64_t i_bitmap_ptr, uint64_t d_bitmap_ptr, uint64_t i_blocks_ptr, uint64_t d_blocks_ptr) {
-    sb->num_inodes = (uint64_t)num_inodes;
-    sb->num_data_blocks = (uint64_t)num_data_blocks;
-    sb->i_bitmap_ptr = i_bitmap_ptr;
-    sb->d_bitmap_ptr = d_bitmap_ptr;
-    sb->i_blocks_ptr = i_blocks_ptr;
-    sb->d_blocks_ptr = d_blocks_ptr;
-    sb->raid_mode = (uint64_t)raid_mode;
-    sb->num_disks = (uint64_t)num_disks;
-
-    raid_info->raid_mode = (uint64_t)raid_mode;
-    raid_info->num_disks = (uint64_t)num_disks;
-
-    // printf("Debug: Superblock initialization:\n");
-    // printf("  num_inodes=%lu, num_data_blocks=%lu\n", sb->num_inodes, sb->num_data_blocks);
-    // printf("  i_bitmap_ptr=%lu, d_bitmap_ptr=%lu, i_blocks_ptr=%lu, d_blocks_ptr=%lu\n", sb->i_bitmap_ptr, sb->d_bitmap_ptr, sb->i_blocks_ptr, sb->d_blocks_ptr);
-    // printf("  num_disks=%lu\n", sb->num_disks);
-}
-
-void write_superblock_and_raid_info(int *fds, int num_disks, struct wfs_sb *sb, struct raid_info *raid_info) {
-    for (int i = 0; i < num_disks; i++) {
-        if (lseek(fds[i], 0, SEEK_SET) == -1) {
-            perror("Failed to seek to superblock position");
-            cleanup(fds, num_disks, NULL);
-            exit(EXIT_FAILURE);
-        }
-        ssize_t written = write(fds[i], sb, sizeof(struct wfs_sb));
-        if (written != (ssize_t)sizeof(struct wfs_sb)) {
-            perror("Failed to write superblock");
-            cleanup(fds, num_disks, NULL);
-            exit(EXIT_FAILURE);
-        }
-        written = write(fds[i], raid_info, sizeof(struct raid_info));
-        if (written != (ssize_t)sizeof(struct raid_info)) {
-            perror("Failed to write RAID info");
-            cleanup(fds, num_disks, NULL);
-            exit(EXIT_FAILURE);
-        }
-        // printf("Debug: Writing superblock to disk %d\n", i);
-        // printf("  num_inodes=%lu, num_data_blocks=%lu\n", sb->num_inodes, sb->num_data_blocks);
-    }
-}
-
-void initialize_bitmaps(int *fds, int num_disks, uint64_t i_bitmap_ptr, uint64_t d_bitmap_ptr, uint64_t inode_bitmap_size, uint64_t data_bitmap_size) {
-    char *inode_bitmap = calloc(1, inode_bitmap_size);
-    char *data_bitmap = calloc(1, data_bitmap_size);
-
-    if (!inode_bitmap || !data_bitmap) {
-        perror("Memory allocation failed");
-        free(inode_bitmap);
-        free(data_bitmap);
-        cleanup(fds, num_disks, NULL);
+        fprintf(stderr, "Error: RAID mode not specified. Use -r [0|1|1v].\n");
         exit(EXIT_FAILURE);
     }
-
-    // Write zeroed inode bitmap
-    for (int i = 0; i < num_disks; i++) {
-        if (lseek(fds[i], i_bitmap_ptr, SEEK_SET) == -1 ||
-            write(fds[i], inode_bitmap, inode_bitmap_size) != (ssize_t)inode_bitmap_size) {
-            perror("Failed to write inode bitmap");
-            free(inode_bitmap);
-            free(data_bitmap);
-            cleanup(fds, num_disks, NULL);
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Write zeroed data bitmap
-    for (int i = 0; i < num_disks; i++) {
-        if (lseek(fds[i], d_bitmap_ptr, SEEK_SET) == -1 ||
-            write(fds[i], data_bitmap, data_bitmap_size) != (ssize_t)data_bitmap_size) {
-            perror("Failed to write data block bitmap");
-            free(inode_bitmap);
-            free(data_bitmap);
-            cleanup(fds, num_disks, NULL);
-            exit(EXIT_FAILURE);
-        }
-    }
-    //printf("Debug: Initializing bitmaps - inode_bitmap_size=%lu, data_bitmap_size=%lu\n", inode_bitmap_size, data_bitmap_size);
-
-    free(inode_bitmap);
-    free(data_bitmap);
-}
-
-void initialize_root_inode(struct wfs_inode *root_inode) {
-    memset(root_inode, 0, sizeof(struct wfs_inode));
-    root_inode->num = 0;
-    root_inode->mode = S_IFDIR | 0755; // Directory with rwxr-xr-x permissions
-    root_inode->uid = getuid();        // Owner's user ID
-    root_inode->gid = getgid();        // Owner's group ID
-    root_inode->size = 0;              // Initially empty
-    root_inode->nlinks = 2;            // Standard for directories
-
-    time_t current_time = time(NULL);
-    root_inode->atim = current_time;
-    root_inode->mtim = current_time;
-    root_inode->ctim = current_time;
-
-    memset(root_inode->blocks, 0, sizeof(root_inode->blocks));
-
-    // printf("Debug: Root inode initialization:\n");
-    // printf("  num=%d, mode=%o, size=%lu, nlinks=%d\n", root_inode->num, root_inode->mode, root_inode->size, root_inode->nlinks);
-}
-
-void update_inode_bitmap(int *fds, int num_disks, uint64_t i_bitmap_ptr, uint64_t inode_bitmap_size) {
-    char *inode_bitmap = calloc(1, inode_bitmap_size);
-    if (!inode_bitmap) {
-        perror("Memory allocation failed");
-        cleanup(fds, num_disks, NULL);
+    if (*num_disks == 0)
+    {
+        fprintf(stderr, "Error: No disks specified. Use -d disk1 [-d disk2 ...].\n");
         exit(EXIT_FAILURE);
     }
-    inode_bitmap[0] |= 1 << 0; // Mark inode 0 as allocated
-
-    // Write updated inode bitmap to all disk images
-    for (int i = 0; i < num_disks; i++) {
-        if (lseek(fds[i], i_bitmap_ptr, SEEK_SET) == -1 ||
-            write(fds[i], inode_bitmap, inode_bitmap_size) != (ssize_t)inode_bitmap_size) {
-            perror("Failed to update inode bitmap");
-            free(inode_bitmap);
-            cleanup(fds, num_disks, NULL);
-            exit(EXIT_FAILURE);
-        }
+    if ((*raid_mode == RAID1 || *raid_mode == RAID1V) && *num_disks < 2)
+    {
+        fprintf(stderr, "Error: RAID 1 and RAID 1v require at least two disks.\n");
+        exit(EXIT_FAILURE);
     }
-
-    // printf("Debug: Updating inode bitmap - inode_bitmap_size=%lu\n", inode_bitmap_size);
-
-    free(inode_bitmap);
-}
-
-void write_root_inode(int *fds, int num_disks, uint64_t i_blocks_ptr, struct wfs_inode *root_inode) {
-    uint64_t root_inode_offset = i_blocks_ptr; // Inode 0 is at the start of inode blocks
-
-    for (int i = 0; i < num_disks; i++) {
-        if (lseek(fds[i], root_inode_offset, SEEK_SET) == -1 ||
-            write(fds[i], root_inode, sizeof(struct wfs_inode)) != sizeof(struct wfs_inode)) {
-            perror("Failed to write root inode");
-            cleanup(fds, num_disks, NULL);
-            exit(EXIT_FAILURE);
-        }
+    if (*num_inodes == -1)
+    {
+        fprintf(stderr, "Error: Number of inodes not specified. Use -i num_inodes.\n");
+        exit(EXIT_FAILURE);
+    }
+    if (*num_data_blocks == -1)
+    {
+        fprintf(stderr, "Error: Number of data blocks not specified. Use -b num_data_blocks.\n");
+        exit(EXIT_FAILURE);
     }
 }
 
-void cleanup(int *fds, int num_disks, char **disk_paths) {
-    // Close file descriptors
-    for (int i = 0; i < num_disks; i++) {
-        if (fds[i] != -1) {
-            close(fds[i]);
-        }
+int initialize_disk(char *paths, int inodes, int blocks, int raid, int f_id, int disk_id)
+{
+    int fd;
+    struct stat st;
+    struct wfs_sb sb;
+    struct wfs_inode inode;
+
+    // a: open the disk image file
+    // printf("START to open files.\n");
+    fd = open_disk_image(paths);
+    if (fd < 0)
+        return -1;
+
+    // b: validate the disk image file's size
+    // printf("START to validate size.\n");
+    if (validate_disk_image(fd, &st) < 0)
+    {
+        close(fd);
+        return -1;
     }
-    free(fds);
-    if (disk_paths) {
-        free(disk_paths);
+
+    // c: initialize the superblock
+    // printf("START to init sb.\n");
+    if (initialize_superblock(&sb, inodes, blocks, st.st_size, f_id, raid, disk_id) < 0)
+    {
+        close(fd);
+        return -1;
     }
+
+    // d: write the superblock to the disk
+    // printf("START to write sb.\n");
+    if (write_superblock(fd, &sb) < 0)
+    {
+        close(fd);
+        return -1;
+    }
+
+    // e: initialize the root inode
+    // printf("START to init root inode.\n");
+    initialize_root_inode(&inode);
+
+    // f: set up the inode bitmap
+    if (initialize_inode_bitmap(fd, sb.i_bitmap_ptr) < 0)
+    {
+        close(fd);
+        return -1;
+    }
+
+    // g: write the root inode to the disk
+    if (write_root_inode(fd, sb.i_blocks_ptr, &inode) < 0)
+    {
+        close(fd);
+        return -1;
+    }
+
+    // h: close the disk image file
+    close(fd);
+    return 0;
+}
+
+int open_disk_image(char *paths)
+{
+    int fd = open(paths, O_RDWR, S_IRWXU);
+    if (fd < 0)
+    {
+        perror("Error opening disk image file");
+    }
+    return fd;
+}
+
+int validate_disk_image(int fd, struct stat *st)
+{
+    if (fstat(fd, st) < 0)
+    {
+        perror("Error validating disk image file");
+        return -1;
+    }
+    return 0;
+}
+
+int initialize_superblock(struct wfs_sb *sb, int inodes, int blocks, size_t size, int f_id, int raid, int disk_id)
+{
+    inodes = ROUNDUP(inodes, 32);
+    blocks = ROUNDUP(blocks, 32);
+
+    // Set up the superblock fields
+    sb->num_inodes = inodes;
+    sb->num_data_blocks = blocks;
+    sb->i_bitmap_ptr = sizeof(struct wfs_sb);
+    sb->d_bitmap_ptr = sb->i_bitmap_ptr + (inodes / 8);
+    sb->i_blocks_ptr = sb->d_bitmap_ptr + (blocks / 8);
+    if (sb->i_blocks_ptr % BLOCK_SIZE != 0)
+    {
+        sb->i_blocks_ptr = (sb->i_blocks_ptr / BLOCK_SIZE + 1) * BLOCK_SIZE;
+    }
+    sb->d_blocks_ptr = sb->i_blocks_ptr + (inodes * BLOCK_SIZE);
+    sb->f_id = f_id;
+    sb->raid = raid;
+    sb->disk_id = disk_id;
+
+    // ensure the superblock fits within the disk size
+    size_t required_size = (inodes * BLOCK_SIZE) + (blocks * BLOCK_SIZE) + sb->i_blocks_ptr;
+    if (required_size > size)
+    {
+        printf("Error: Too many blocks requested, superblock setup failed.\n");
+        return -1;
+    }
+
+    printf("Superblock initialized: inodes=%d, blocks=%d, size=%zu\n", inodes, blocks, size);
+    return 0;
+}
+
+int write_superblock(int fd, struct wfs_sb *sb)
+{
+    if (write(fd, sb, sizeof(struct wfs_sb)) < 0)
+    {
+        perror("Error writing superblock to disk");
+        return -1;
+    }
+    return 0;
+}
+
+void initialize_root_inode(struct wfs_inode *inode)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+
+    memset(inode, 0, sizeof(struct wfs_inode));
+    inode->mode = S_IFDIR | S_IRUSR | S_IWUSR | S_IXUSR;
+    inode->uid = getuid();
+    inode->gid = getgid();
+    inode->size = 0;
+    inode->nlinks = 1;
+    inode->atim = t.tv_sec;
+    inode->mtim = t.tv_sec;
+    inode->ctim = t.tv_sec;
+}
+
+int initialize_inode_bitmap(int fd, off_t bitmap_ptr)
+{
+    uint32_t bit = 0x1; // mark the first inode as used
+    lseek(fd, bitmap_ptr, SEEK_SET);
+    if (write(fd, &bit, sizeof(uint32_t)) < 0)
+    {
+        perror("Error setting up inode bitmap");
+        return -1;
+    }
+    return 0;
+}
+
+int write_root_inode(int fd, off_t inode_ptr, struct wfs_inode *inode)
+{
+    lseek(fd, inode_ptr, SEEK_SET);
+    if (write(fd, inode, sizeof(struct wfs_inode)) < 0)
+    {
+        perror("Error writing root inode to disk");
+        return -1;
+    }
+    return 0;
 }

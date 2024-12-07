@@ -1,3 +1,6 @@
+#ifndef WFS_H
+#define WFS_H
+
 #include <time.h>
 #include <sys/stat.h>
 #include <stdint.h>
@@ -14,7 +17,6 @@
 #define RAID1 1
 #define RAID1V 2
 
-
 /*
   The fields in the superblock should reflect the structure of the filesystem.
   `mkfs` writes the superblock to offset 0 of the disk image. 
@@ -30,7 +32,7 @@ i_bitmap_ptr        i_blocks_ptr
 
 */
 
-// Superblock
+// Superblock structure
 struct wfs_sb {
     size_t num_inodes;
     size_t num_data_blocks;
@@ -38,13 +40,15 @@ struct wfs_sb {
     off_t d_bitmap_ptr;
     off_t i_blocks_ptr;
     off_t d_blocks_ptr;
+
     // Extend after this line
-    int raid_mode;
-    uint64_t *disk_order;      
-    uint64_t num_disks;        
+    int f_id;             // unique id for the filesystem
+    int raid;             // the RAID mode of the filesystem
+    uint64_t disk_id;     // Unique ID or order of this disk in the RAID array
+    
 };
 
-// Inode
+// Inode structure
 struct wfs_inode {
     int     num;      /* Inode number */
     mode_t  mode;     /* File type and mode */
@@ -57,16 +61,14 @@ struct wfs_inode {
     time_t mtim;      /* Time of last modification */
     time_t ctim;      /* Time of last status change */
 
-    off_t blocks[N_BLOCKS];
+    off_t blocks[N_BLOCKS]; /* Direct and indirect block pointers */
 };
 
-// Directory entry
+// Directory entry structure
 struct wfs_dentry {
     char name[MAX_NAME];
     int num;
 };
 
-struct __attribute__((packed)) raid_info {
-    uint64_t raid_mode;
-    uint64_t num_disks;
-};
+#endif // WFS_H
+
